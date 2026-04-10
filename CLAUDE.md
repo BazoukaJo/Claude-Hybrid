@@ -59,7 +59,7 @@ Root **`.gitignore`** may exclude `router/hybrid.config.json` and some `.claude/
 - Last user message contains any `routing.keywords` entry
 
 **Else local.**  
-With **`local.smart_routing`** and multiple models in the pool, **`router/lib/local-model-picker.js`** scores by vision/tools, size, “heavy” vs “brief” prompts, and optional **`local.fast_model`**.
+With **`local.smart_routing`** and multiple models in the pool, **`router/lib/local-model-picker.js`** scores by vision/tools, size, “heavy” vs “brief” prompts, optional **`local.fast_model`**, and **tool results in the latest user message** (Claude Code always sends tools in the schema; the picker uses real `tool_result` volume and mid-turn heuristics, not “tools array present” alone).
 
 ## API touches agents often care about
 
@@ -97,9 +97,11 @@ node scripts\merge-claude-hybrid-env.js
 ## Tests
 
 ```powershell
-npm test
+npm test   # includes tests/daily-routing-scenarios.test.cjs (routine → local, heavy/keywords → cloud vs hybrid.config.example.json)
 npm run test:e2e-ui    # Playwright UI screenshots; needs: npm i && npx playwright install chromium
 npm run test:all
+.\tests\validate-routing.ps1   # live router + Ollama: probes local, keyword cloud, heavy tool-turn (hybrid)
+.\tests\run-all.ps1              # Node tests + validate-routing.ps1 when :8082 is up
 ```
 
 ## Agent discipline

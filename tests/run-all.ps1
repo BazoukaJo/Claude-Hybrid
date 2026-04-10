@@ -10,7 +10,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 Write-Host "== Node tests (unit + HTTP integration on TEST_ROUTER_PORT) ==" -ForegroundColor Cyan
-node --test tests/model-utils.test.cjs tests/routing-logic.test.cjs tests/local-model-picker.test.cjs tests/router-http.test.cjs tests/router-admin-http.test.cjs tests/dashboard-recent-smoke.cjs
+node --test tests/model-utils.test.cjs tests/routing-logic.test.cjs tests/daily-routing-scenarios.test.cjs tests/local-model-picker.test.cjs tests/router-http.test.cjs tests/router-admin-http.test.cjs tests/dashboard-recent-smoke.cjs
 if ($LASTEXITCODE -ne 0) {
     Write-Host "FAIL: Node tests exited $LASTEXITCODE" -ForegroundColor Red
     exit $LASTEXITCODE

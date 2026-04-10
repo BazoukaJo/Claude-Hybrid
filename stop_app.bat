@@ -4,11 +4,20 @@ cd /d "%~dp0"
 
 if "%ROUTER_PORT%"=="" set "ROUTER_PORT=8082"
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$p=[int]$env:ROUTER_PORT; if(-not$p){$p=8082}; " ^
-  "$conns=Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue; " ^
-  "if(-not$conns){Write-Host ('Nothing listening on port '+$p+'.'); exit 0}; " ^
-  "$ids=$conns|Select-Object -ExpandProperty OwningProcess -Unique; " ^
-  "foreach($id in $ids){ try{ Stop-Process -Id $id -Force -ErrorAction Stop; Write-Host ('Stopped PID '+$id+'.') } catch{ Write-Host ('Could not stop PID '+$id+': '+$_.Exception.Message) } }"
+set "STOP_EC=0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop-listener-on-port.ps1" -Port %ROUTER_PORT%
+if errorlevel 1 set "STOP_EC=1"
 
-exit /b %ERRORLEVEL%
+REM Optional: also clear hybrid routing env — only when explicitly requested:
+REM   stop_app.bat revert
+if /I "%~1"=="revert" goto :do_revert
+goto :end
+
+:do_revert
+echo.
+echo Reverting hybrid User env + Claude settings.json...
+call "%~dp0scripts\revert-hybrid-core.bat"
+if errorlevel 1 set "STOP_EC=1"
+
+:end
+exit /b %STOP_EC%

@@ -517,3 +517,107 @@ html.hybrid-dashboard.light .btn-secondary {
   border-color: rgba(0, 0, 0, 0.12);
   color: var(--text2);
 }
+
+.hybrid-dashboard .btn-outline-secondary {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text2);
+}
+
+html.hybrid-dashboard.light .btn-outline-secondary {
+  border-color: rgba(0, 0, 0, 0.15);
+}
+
+/* Settings button inner layout */
+.hybrid-dashboard .model-action-settings-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  pointer-events: none;
+}
+
+.hybrid-dashboard .model-settings-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.12rem 0.38rem;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+}
+
+.hybrid-dashboard .model-settings-badge--default {
+  background: rgba(108, 117, 125, 0.22);
+  color: #adb5bd;
+}
+
+.hybrid-dashboard .model-settings-badge--set {
+  background: transparent;
+}
+
+html.hybrid-dashboard.light .model-settings-badge--default {
+  color: #495057;
+}
+
+/* "…" overflow menu */
+.hybrid-dashboard .model-card-more-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  background: var(--od-spec-tile-bg, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--od-spec-tile-border, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  padding: 0.35rem 0.2rem;
+  margin-top: 0.15rem;
+  animation: od-fadeInUp 0.18s ease-out;
+}
+
+.hybrid-dashboard .model-card-more-menu button {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 0.8rem;
+  text-align: left;
+  padding: 0.3rem 0.55rem;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.hybrid-dashboard .model-card-more-menu button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+html.hybrid-dashboard.light .model-card-more-menu button:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.hybrid-dashboard .model-card-more-menu hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 0.15rem 0;
+}
+
+html.hybrid-dashboard.light .model-card-more-menu hr {
+  border-top-color: rgba(0, 0, 0, 0.08);
+}
+
+/* Default badge in card header */
+.hybrid-dashboard .model-list-badge.default {
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(13, 110, 253, 0.18);
+  color: #6ea8fe;
+  border: 1px solid rgba(13, 110, 253, 0.3);
+}
+
+html.hybrid-dashboard.light .model-list-badge.default {
+  color: #0d6efd;
+}
+
+/* "…" toggle button - full width */
+.hybrid-dashboard .model-card-more-toggle {
+  grid-column: 1 / -1;
+}

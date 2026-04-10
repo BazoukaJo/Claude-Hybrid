@@ -39,6 +39,33 @@ function parseParameterBillions(parameterSize) {
   return null;
 }
 
+/**
+ * When Ollama /api/show omits parameter_size, infer scale from tag (e.g. llama3.2:3b, mymodel-26b-q4).
+ */
+function inferParamBillionsFromName(name) {
+  const s = String(name || '').toLowerCase();
+  const m1 = s.match(/(?:^|[\/:_-])(\d+(?:\.\d+)?)\s*b\b/);
+  if (m1) {
+    const n = Number(m1[1]);
+    return Number.isFinite(n) ? n : null;
+  }
+  const m2 = s.match(/(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*b\b/);
+  if (m2) {
+    const n = Number(m2[2]);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function effectiveParamBillions(profile) {
+  if (profile.param_billions != null && Number.isFinite(profile.param_billions)) {
+    return profile.param_billions;
+  }
+  const inferred = inferParamBillionsFromName(profile.name);
+  if (inferred != null) return inferred;
+  return 7;
+}
+
 /** Inspect Anthropic-shaped /v1/messages body for routing hints. */
 function analyzeLocalTask(body) {
   const msgs = body.messages || [];
@@ -53,7 +80,8 @@ function analyzeLocalTask(body) {
   }
   const estTokens = Math.ceil(chars / 4);
 
-  const needsTools = Array.isArray(body.tools) && body.tools.length > 0;
+  /** Claude Code sends tool definitions on almost every request — do not treat as “active tool work”. */
+  const toolsInSchema = Array.isArray(body.tools) && body.tools.length > 0;
 
   let needsVision = false;
   for (const m of msgs) {
@@ -69,9 +97,16 @@ function analyzeLocalTask(body) {
 
   const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
   let text = '';
+  let toolResultsThisTurn = 0;
   if (lastUser) {
     if (typeof lastUser.content === 'string') text = lastUser.content;
-    else text = (lastUser.content || []).map((b) => b.text || '').join(' ');
+    else {
+      for (const b of lastUser.content || []) {
+        if (b && b.type === 'tool_result') toolResultsThisTurn++;
+        else if (b && b.type === 'text') text += `${b.text || ''} `;
+      }
+      text = text.trim();
+    }
   }
   const t = text.toLowerCase();
   const heavyKeywords = [
@@ -79,7 +114,10 @@ function analyzeLocalTask(body) {
     'security audit', 'system design', 'deep reason', 'race condition', 'design pattern',
     'from scratch', 'data model', 'api design',
   ];
-  const prefersHeavy = estTokens > 2200 || heavyKeywords.some((k) => t.includes(k));
+  const prefersHeavy =
+    estTokens > 2200 ||
+    heavyKeywords.some((k) => t.includes(k)) ||
+    toolResultsThisTurn >= 5;
 
   /** Latency-oriented prompts (router analogue to “draft path” / small model — not true speculative decoding). */
   const speedKeywords = [
@@ -90,10 +128,17 @@ function analyzeLocalTask(body) {
   const prefersSpeed =
     !prefersHeavy &&
     !needsVision &&
-    !needsTools &&
+    toolResultsThisTurn === 0 &&
     speedKeywords.some((k) => t.includes(k));
 
-  return { estTokens, needsTools, needsVision, prefersHeavy, prefersSpeed };
+  return {
+    estTokens,
+    toolsInSchema,
+    toolResultsThisTurn,
+    needsVision,
+    prefersHeavy,
+    prefersSpeed,
+  };
 }
 
 function nameSuggestsVision(name) {
@@ -102,6 +147,17 @@ function nameSuggestsVision(name) {
 
 function nameSuggestsTools(name) {
   return /tool|function|hermes|firefunction|nexusraven/i.test(String(name || ''));
+}
+
+/** Coding-oriented tags (tool + code quality) — boosts when tools are in play or tool results are heavy. */
+function nameSuggestsCoder(name) {
+  return /coder|code-|starcoder|codestral|codellama|deepseek.*coder|qwen.*coder|granite-code|command-r|devstral|mistral-nemo|phi4|gpt-oss|solar-pro|wizardcoder|phind|duckdb-nsm/i.test(
+    String(name || ''),
+  );
+}
+
+function toolCapableProfile(p) {
+  return p.has_tools === true || nameSuggestsTools(p.name);
 }
 
 /**
@@ -119,39 +175,65 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
     Math.max(2048, Math.ceil(task.estTokens * 2.2), Number(effectiveNumCtx) || 4096),
   );
 
+  const toolsInSchema =
+    task.toolsInSchema !== undefined && task.toolsInSchema !== null
+      ? !!task.toolsInSchema
+      : !!task.needsTools;
+  const toolResultsThisTurn =
+    task.toolResultsThisTurn != null && Number.isFinite(task.toolResultsThisTurn)
+      ? Math.max(0, Math.trunc(task.toolResultsThisTurn))
+      : 0;
+  const needsVision = !!task.needsVision;
+  const prefersHeavy = !!task.prefersHeavy;
+  const prefersSpeed = !!task.prefersSpeed;
+
   const viable = profiles.filter((p) => {
     if (p.context_max != null && Number.isFinite(p.context_max) && p.context_max < minCtx) return false;
-    if (task.needsVision && p.has_vision === false && !nameSuggestsVision(p.name)) return false;
-    if (task.needsTools && p.has_tools === false && !nameSuggestsTools(p.name)) return false;
+    if (needsVision && p.has_vision === false && !nameSuggestsVision(p.name)) return false;
+    if (toolsInSchema && !toolCapableProfile(p)) return false;
     return true;
   });
   const pool = viable.length ? viable : profiles;
 
+  const activeToolPayload = toolResultsThisTurn > 0;
+  /** Several tool outputs this turn but below prefersHeavy threshold — favor larger models slightly. */
+  const midToolTurn =
+    !prefersHeavy && activeToolPayload && toolResultsThisTurn >= 2 && toolResultsThisTurn < 5;
+  const coderBoostWeight = toolsInSchema || activeToolPayload ? 1 : 0;
+
   const scoreOf = (p) => {
     let s = 0;
-    const pb = p.param_billions != null && Number.isFinite(p.param_billions) ? p.param_billions : 7;
-
-    if (task.prefersHeavy) {
-      s += pb * 4;
-      if (p.has_reasoning === true) s += 5;
-      if (p.has_tools === true) s += task.needsTools ? 12 : 1;
-      if (p.has_vision === true) s += task.needsVision ? 14 : 0;
-      else if (task.needsVision && nameSuggestsVision(p.name)) s += 8;
-    } else {
-      s -= pb * 2.5;
-      if (p.has_tools === true) s += task.needsTools ? 15 : 2;
-      if (p.has_vision === true) s += task.needsVision ? 15 : 0;
-      else if (task.needsVision && nameSuggestsVision(p.name)) s += 10;
-      if (pb < 4) s += 6;
-      if (task.prefersSpeed) s -= pb * 1.8;
+    const pb = effectiveParamBillions(p);
+    const toolCap = toolCapableProfile(p);
+    const ctxMax = p.context_max != null && Number.isFinite(p.context_max) ? p.context_max : null;
+    if (ctxMax != null && ctxMax >= minCtx) {
+      s += Math.min(6, (ctxMax - minCtx) / 16384);
     }
 
-    if (
-      task.prefersSpeed &&
-      !task.prefersHeavy &&
-      fastNorm &&
-      norm(p.name) === fastNorm
-    ) {
+    let toolShapeBonus = 0;
+    if (toolsInSchema && toolCap) toolShapeBonus += 3;
+    if (activeToolPayload && toolCap) toolShapeBonus += 8 + Math.min(10, toolResultsThisTurn * 1.2);
+    if (coderBoostWeight && nameSuggestsCoder(p.name)) s += 5 + (activeToolPayload ? 4 : 0);
+
+    if (prefersHeavy) {
+      s += pb * 4;
+      if (p.has_reasoning === true) s += 5;
+      s += toolShapeBonus;
+      if (p.has_vision === true) s += needsVision ? 14 : 0;
+      else if (needsVision && nameSuggestsVision(p.name)) s += 8;
+    } else {
+      const lightSizePenalty = midToolTurn ? 0.85 : 2.5;
+      s -= pb * lightSizePenalty;
+      s += toolShapeBonus;
+      if (midToolTurn) s += pb * 1.35;
+      if (p.has_vision === true) s += needsVision ? 15 : 0;
+      else if (needsVision && nameSuggestsVision(p.name)) s += 10;
+      if (pb < 4) s += 6;
+      if (prefersSpeed) s -= pb * 1.8;
+      if (toolsInSchema && toolCap && !activeToolPayload && pb <= 9) s += 4;
+    }
+
+    if (prefersSpeed && !prefersHeavy && fastNorm && norm(p.name) === fastNorm) {
       s += 24;
     }
 
@@ -160,14 +242,24 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
   };
 
   const scored = pool.map((p) => ({ p, score: scoreOf(p) }));
-  scored.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    const da = norm(a.p.name) === norm(defaultModel);
+    const db = norm(b.p.name) === norm(defaultModel);
+    if (da !== db) return db ? 1 : -1;
+    return norm(a.p.name).localeCompare(norm(b.p.name));
+  });
   const winner = scored[0].p;
 
-  let reason = task.prefersHeavy ? 'heavier task → larger / capable model' : 'lighter task → smaller / fast model';
-  if (task.prefersSpeed) reason += ' · speed-priority prompt';
-  if (fastNorm && task.prefersSpeed && norm(winner.name) === fastNorm) reason += ' · fast_model';
-  if (task.needsVision) reason += ' · vision';
-  if (task.needsTools) reason += ' · tools';
+  let reason = prefersHeavy ? 'heavier task → larger / capable model' : 'lighter task → smaller / fast model';
+  if (prefersSpeed) reason += ' · speed-priority prompt';
+  if (fastNorm && prefersSpeed && norm(winner.name) === fastNorm) reason += ' · fast_model';
+  if (needsVision) reason += ' · vision';
+  if (toolsInSchema) reason += ' · tools in schema';
+  if (activeToolPayload) {
+    reason += ` · ${toolResultsThisTurn} tool results this turn`;
+    if (midToolTurn) reason += ' · mid tool-turn';
+  }
   if (viable.length < profiles.length) reason += ' · filtered by context/caps';
 
   return { model: winner.name, reason, scores: scored.map((x) => ({ name: x.p.name, score: x.score })) };
@@ -176,7 +268,10 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
 module.exports = {
   resolveLocalPool,
   parseParameterBillions,
+  inferParamBillionsFromName,
+  effectiveParamBillions,
   analyzeLocalTask,
   pickBestLocalModel,
   nameSuggestsVision,
+  nameSuggestsCoder,
 };

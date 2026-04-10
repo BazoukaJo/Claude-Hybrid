@@ -771,6 +771,7 @@
       const icon = document.querySelector("#refreshDashboardBtn i");
       if (icon) icon.classList.add("fa-spin");
       await updateHealthAndVersion();
+      await updateSystemStats();
       if (icon) setTimeout(() => icon.classList.remove("fa-spin"), 250);
     }
 
@@ -982,12 +983,17 @@
     }
 
     setInterval(updateTimeAndCountdown, 1000);
-    setInterval(function () {
-      if (document.visibilityState !== "visible") return;
-      void updateSystemStats();
-    }, 1000);
+    async function statsPollLoop() {
+      try {
+        await updateSystemStats();
+      } catch (_) {}
+      setTimeout(function () {
+        void statsPollLoop();
+      }, 1000);
+    }
+    void statsPollLoop();
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState === "visible") void updateSystemStats();
+      void updateSystemStats();
     });
     function scheduleHeaderUiBoot() {
       const go = () => {
@@ -995,6 +1001,7 @@
         void loadExistingLogs();
         startLogStream();
         initializeResizableFooter();
+        void updateSystemStats();
       };
       if (typeof requestAnimationFrame === "function") {
         requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(go, 0)));

@@ -248,11 +248,14 @@ function sampleCpuPercent() {
       if (lastCpuAgg) {
         const idle = cur.idle - lastCpuAgg.idle;
         const total = sumCpuTimes(cur) - sumCpuTimes(lastCpuAgg);
-        pct = total > 0 ? Math.round((1 - idle / total) * 100) : 0;
+        if (total > 0) {
+          const ratio = 1 - idle / total;
+          pct = Math.round(Math.min(1, Math.max(0, ratio)) * 100);
+        }
       }
       lastCpuAgg = cur;
       if (!Number.isFinite(pct)) return null;
-      return Math.min(100, Math.max(0, pct));
+      return pct;
     } catch {
       return null;
     }
@@ -263,13 +266,18 @@ function sampleCpuPercent() {
 
 function parseNvidiaSmiCsv(stdout) {
   if (!stdout || typeof stdout !== 'string') return null;
-  const line = stdout.trim().split(/\r?\n/).find((l) => l.trim());
-  if (!line) return null;
-  const parts = line.split(',').map((s) => parseFloat(String(s).trim()));
-  if (parts.length < 3) return null;
-  const [tot, used, gpu] = parts;
-  if (![tot, used, gpu].every((n) => Number.isFinite(n))) return null;
-  return { vram_total_mb: tot, vram_used_mb: used, gpu_util: gpu };
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    const parts = line.split(',').map((s) => parseFloat(String(s).trim().replace(/\s/g, '')));
+    if (parts.length < 3) continue;
+    const [tot, used, gpu] = parts;
+    if (![tot, used, gpu].every((n) => Number.isFinite(n))) continue;
+    return { vram_total_mb: tot, vram_used_mb: used, gpu_util: gpu };
+  }
+  return null;
 }
 
 let nvidiaCache = null, nvidiaCacheAt = 0;
@@ -618,7 +626,8 @@ function buildOpenAI(body, p, ollamaModelName) {
 function toAnthropic(oai, model) {
   const choice = oai.choices?.[0], msg = choice?.message||{};
   const content = [];
-  if (msg.content) content.push({ type:'text', text:msg.content });
+  const textBody = msg.content || msg.reasoning || '';
+  if (textBody) content.push({ type:'text', text:textBody });
   for (const tc of msg.tool_calls||[]) content.push({ type:'tool_use', id:tc.id, name:tc.function.name, input:(()=>{try{return JSON.parse(tc.function.arguments);}catch{return{};}})() });
   const stopMap = { stop:'end_turn', tool_calls:'tool_use', length:'max_tokens' };
   return { id:oai.id||`msg_local_${Date.now()}`, type:'message', role:'assistant', content, model, stop_reason:stopMap[choice?.finish_reason]||'end_turn', stop_sequence:null, usage:{ input_tokens:oai.usage?.prompt_tokens||0, output_tokens:oai.usage?.completion_tokens||0 } };
@@ -633,7 +642,7 @@ function pipeLocalStream(src, res, model) {
   const ensureStarted=()=>{ if(started)return; started=true; send('message_start',{type:'message_start',message:{id:msgId,type:'message',role:'assistant',content:[],model,stop_reason:null,stop_sequence:null,usage:{input_tokens:0,output_tokens:0}}}); send('ping',{type:'ping'}); };
   const openText=()=>{ if(textOpen)return; if(toolOpen){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;toolOpen=false;toolI=null;} textOpen=true; send('content_block_start',{type:'content_block_start',index:blockIdx,content_block:{type:'text',text:''}}); };
   const openTool=(i,tid,name)=>{ if(toolOpen&&toolI===i)return; if(textOpen){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;textOpen=false;} if(toolOpen&&toolI!==i){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;} toolOpen=true;toolI=i; send('content_block_start',{type:'content_block_start',index:blockIdx,content_block:{type:'tool_use',id:tid,name,input:{}}}); };
-  src.on('data', chunk=>{ buf+=chunk.toString(); const lines=buf.split('\n'); buf=lines.pop(); for(const line of lines){ if(!line.startsWith('data: '))continue; const raw=line.slice(6).trim(); if(raw==='[DONE]')continue; let p;try{p=JSON.parse(raw);}catch{continue;} const d=p.choices?.[0]?.delta,fin=p.choices?.[0]?.finish_reason; if(!d&&!fin)continue; ensureStarted(); if(d?.content){openText();send('content_block_delta',{type:'content_block_delta',index:blockIdx,delta:{type:'text_delta',text:d.content}});} if(d?.tool_calls){for(const tc of d.tool_calls){const i=tc.index??0;if(!tools[i])tools[i]={id:tc.id||`toolu_${Date.now()}_${i}`,name:tc.function?.name||''};if(tc.id)tools[i].id=tc.id;if(tc.function?.name)tools[i].name=tc.function.name;openTool(i,tools[i].id,tools[i].name);if(tc.function?.arguments)send('content_block_delta',{type:'content_block_delta',index:blockIdx,delta:{type:'input_json_delta',partial_json:tc.function.arguments}});}} if(fin){if(textOpen||toolOpen)send('content_block_stop',{type:'content_block_stop',index:blockIdx});ensureStarted();const stopMap={stop:'end_turn',tool_calls:'tool_use',length:'max_tokens'};send('message_delta',{type:'message_delta',delta:{stop_reason:stopMap[fin]||'end_turn',stop_sequence:null},usage:{output_tokens:0}});send('message_stop',{type:'message_stop'});} } });
+  src.on('data', chunk=>{ buf+=chunk.toString(); const lines=buf.split('\n'); buf=lines.pop(); for(const line of lines){ if(!line.startsWith('data: '))continue; const raw=line.slice(6).trim(); if(raw==='[DONE]')continue; let p;try{p=JSON.parse(raw);}catch{continue;} const d=p.choices?.[0]?.delta,fin=p.choices?.[0]?.finish_reason; if(!d&&!fin)continue; ensureStarted(); const textChunk=d?.content||d?.reasoning||''; if(textChunk){openText();send('content_block_delta',{type:'content_block_delta',index:blockIdx,delta:{type:'text_delta',text:textChunk}});} if(d?.tool_calls){for(const tc of d.tool_calls){const i=tc.index??0;if(!tools[i])tools[i]={id:tc.id||`toolu_${Date.now()}_${i}`,name:tc.function?.name||''};if(tc.id)tools[i].id=tc.id;if(tc.function?.name)tools[i].name=tc.function.name;openTool(i,tools[i].id,tools[i].name);if(tc.function?.arguments)send('content_block_delta',{type:'content_block_delta',index:blockIdx,delta:{type:'input_json_delta',partial_json:tc.function.arguments}});}} if(fin){if(textOpen||toolOpen)send('content_block_stop',{type:'content_block_stop',index:blockIdx});ensureStarted();const stopMap={stop:'end_turn',tool_calls:'tool_use',length:'max_tokens'};send('message_delta',{type:'message_delta',delta:{stop_reason:stopMap[fin]||'end_turn',stop_sequence:null},usage:{output_tokens:0}});send('message_stop',{type:'message_stop'});} } });
   src.on('end',()=>res.end()); src.on('error',()=>res.end());
 }
 
@@ -884,16 +893,40 @@ a{color:inherit}
 @media(max-width:480px){.hdr-brand{display:none}}
 .routing-mode-btn{
   font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer;white-space:nowrap;flex-shrink:0;
-  transition:filter .15s,transform .1s;
+  transition:filter .15s,transform .12s,box-shadow .15s;
+  font-family:inherit;
 }
 .routing-mode-btn:hover{filter:brightness(1.12)}
 .routing-mode-btn:active{transform:scale(.97)}
+.routing-mode-btn--section{
+  display:inline-flex;align-items:center;justify-content:center;gap:.35rem;
+  min-height:40px;padding:10px 20px;font-size:12.5px;font-weight:700;border-radius:10px;border-width:2px;
+  box-shadow:0 2px 4px rgba(0,0,0,.2),inset 0 1px 0 rgba(255,255,255,.08);
+}
+.routing-mode-btn--section:hover{
+  filter:brightness(1.06);
+  box-shadow:0 4px 14px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.1);
+  transform:translateY(-1px);
+}
+.routing-mode-btn--section:active{
+  transform:translateY(0) scale(.98);
+  box-shadow:0 1px 3px rgba(0,0,0,.18),inset 0 1px 0 rgba(255,255,255,.06);
+}
+.routing-mode-btn--section:focus-visible{
+  outline:2px solid var(--accent);outline-offset:3px;
+}
 .routing-mode--hybrid{background:rgba(245,158,11,.22);color:#fbbf24;border-color:rgba(245,158,11,.5);box-shadow:0 0 0 1px rgba(245,158,11,.12)}
 .routing-mode--cloud{background:rgba(167,139,250,.22);color:#c4b5fd;border-color:rgba(167,139,250,.55);box-shadow:0 0 0 1px rgba(167,139,250,.12)}
 .routing-mode--local{background:rgba(34,197,94,.2);color:#4ade80;border-color:rgba(34,197,94,.5);box-shadow:0 0 0 1px rgba(34,197,94,.1)}
+.routing-mode-btn--section.routing-mode--hybrid{box-shadow:0 2px 6px rgba(245,158,11,.15),inset 0 1px 0 rgba(255,255,255,.1)}
+.routing-mode-btn--section.routing-mode--cloud{box-shadow:0 2px 6px rgba(139,92,246,.18),inset 0 1px 0 rgba(255,255,255,.1)}
+.routing-mode-btn--section.routing-mode--local{box-shadow:0 2px 6px rgba(34,197,94,.14),inset 0 1px 0 rgba(255,255,255,.1)}
 html.light .routing-mode--hybrid{color:#b45309;border-color:rgba(217,119,6,.45);background:rgba(251,191,36,.25)}
 html.light .routing-mode--cloud{color:#5b21b6;border-color:rgba(124,58,237,.4);background:rgba(196,181,253,.35)}
 html.light .routing-mode--local{color:#15803d;border-color:rgba(22,163,74,.45);background:rgba(134,239,172,.35)}
+html.light .routing-mode-btn--section.routing-mode--hybrid{box-shadow:0 2px 8px rgba(217,119,6,.12),inset 0 1px 0 rgba(255,255,255,.5)}
+html.light .routing-mode-btn--section.routing-mode--cloud{box-shadow:0 2px 8px rgba(124,58,237,.12),inset 0 1px 0 rgba(255,255,255,.45)}
+html.light .routing-mode-btn--section.routing-mode--local{box-shadow:0 2px 8px rgba(22,163,74,.1),inset 0 1px 0 rgba(255,255,255,.45)}
 /* meta panel */
 .hdr-meta{display:flex;flex-direction:column;align-items:flex-end;gap:.18rem;background:var(--meta-bg);border:1px solid var(--meta-border);border-radius:.4rem;padding:.2rem .5rem}
 .chips{display:flex;flex-wrap:wrap;gap:.2rem;justify-content:flex-end}
@@ -920,11 +953,12 @@ html.light .sun{display:inline} html.light .moon{display:none}
 .res-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3)}
 .res-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
 @media(max-width:560px){.res-grid{grid-template-columns:repeat(2,1fr)}}
-.res-metric{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 9px}
+.res-metric{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 9px;min-width:0}
 .res-row{display:flex;justify-content:space-between;align-items:center}
 .res-label{font-size:.65rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em}
 .res-val{font-size:.78rem;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
-canvas.spark{width:100%;height:10px;border-radius:2px;display:block;margin-top:.08rem}
+canvas.spark{width:100%;min-width:0;height:10px;border-radius:2px;display:block;margin-top:.08rem;vertical-align:top;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08)}
+html.light canvas.spark{background:rgba(0,0,0,.04);border:1px solid rgba(0,0,0,.08)}
 
 /* ── Main content ─────────────────────────────────────────────────── */
 .main{
@@ -955,6 +989,18 @@ h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;le
 }
 .dash-subsection-title:first-of-type{margin-top:4px}
 .dash-card--models-runtime{padding:13px 16px}
+.models-routing-bar{
+  display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px 18px;
+  margin:0 0 14px;padding:12px 14px;border-radius:var(--dash-card-radius);
+  border:1px solid var(--border);background:var(--surface2);
+}
+.models-routing-bar-text{display:flex;flex-direction:column;gap:3px;flex:1 1 12rem;min-width:min(100%,10rem)}
+.models-routing-bar-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--text3)}
+.models-routing-bar-hint{font-size:11px;color:var(--text2);line-height:1.4;max-width:40rem}
+@media(max-width:520px){
+  .models-routing-bar{flex-direction:column;align-items:stretch}
+  .routing-mode-btn--section{width:100%}
+}
 .models-toolbar-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;margin-bottom:6px}
 .models-toolbar-default{display:flex;flex-direction:column;gap:3px;flex:1 1 min(100%,16rem);min-width:min(100%,12rem)}
 .models-toolbar-default .local-model-lbl{margin:0}
@@ -1208,8 +1254,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
         <span class="hdr-logo"><img src="/assets/ollama-logo.png" alt="Ollama"></span>
         <span class="hdr-logo"><img src="/assets/claude-code-icon.svg" alt="Claude Code"></span>
       </span>
-      <span class="hdr-brand">Claude Hybrid</span>
-      <button type="button" class="routing-mode-btn routing-mode--${routingModeInitial}" id="routing-mode-btn" title="Click to cycle: Hybrid → Claude only → Ollama only" aria-label="Routing mode: ${routingModeLabel.replace(/"/g, '&quot;')}">${routingModeLabel}</button>
+           <span class="hdr-brand">Claude Hybrid</span>
       <span class="health-badge degraded" id="health-badge">
         <span class="health-dot"></span>
         <span id="health-text">Checking...</span>
@@ -1245,10 +1290,10 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
         <span class="res-title" id="dash-sys-h">System load</span>
       </div>
       <div class="res-grid">
-        <div class="res-metric"><div class="res-row"><span class="res-label">CPU</span><span class="res-val" id="r-cpu">—%</span></div><canvas class="spark" id="spark-cpu"></canvas></div>
-        <div class="res-metric"><div class="res-row"><span class="res-label">RAM</span><span class="res-val" id="r-ram">—%</span></div><canvas class="spark" id="spark-ram"></canvas></div>
-        <div class="res-metric"><div class="res-row"><span class="res-label">VRAM</span><span class="res-val" id="r-vram">—%</span></div><canvas class="spark" id="spark-vram"></canvas></div>
-        <div class="res-metric"><div class="res-row"><span class="res-label">GPU</span><span class="res-val" id="r-gpu">—%</span></div><canvas class="spark" id="spark-gpu"></canvas></div>
+        <div class="res-metric"><div class="res-row"><span class="res-label">CPU</span><span class="res-val" id="r-cpu">—%</span></div><canvas class="spark" id="spark-cpu" width="200" height="12"></canvas></div>
+        <div class="res-metric"><div class="res-row"><span class="res-label">RAM</span><span class="res-val" id="r-ram">—%</span></div><canvas class="spark" id="spark-ram" width="200" height="12"></canvas></div>
+        <div class="res-metric"><div class="res-row"><span class="res-label">VRAM</span><span class="res-val" id="r-vram">—%</span></div><canvas class="spark" id="spark-vram" width="200" height="12"></canvas></div>
+        <div class="res-metric"><div class="res-row"><span class="res-label">GPU</span><span class="res-val" id="r-gpu">—%</span></div><canvas class="spark" id="spark-gpu" width="200" height="12"></canvas></div>
       </div>
     </div>
   </div>
@@ -1300,16 +1345,20 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
     if(!r.ok)throw 0;
     return r.json();
   }).then(function(d){
-    function pct(el,v){
-      if(!el)return;
-      if(v==null||v===''){ el.textContent='—%'; return; }
-      var n=Number(v);
-      el.textContent=isFinite(n)?(Math.round(n)+'%'):'—%';
+    if(typeof window.__claudeHybridIngestSystemStats==='function'){
+      try{ window.__claudeHybridIngestSystemStats(d); }catch(_){}
+    } else {
+      function pct(el,v){
+        if(!el)return;
+        if(v==null||v===''){ el.textContent='—%'; return; }
+        var n=Number(v);
+        el.textContent=isFinite(n)?(Math.round(n)+'%'):'—%';
+      }
+      pct(document.getElementById('r-cpu'),d.cpu);
+      pct(document.getElementById('r-ram'),d.ram);
+      pct(document.getElementById('r-vram'),d.vram);
+      pct(document.getElementById('r-gpu'),d.gpu);
     }
-    pct(document.getElementById('r-cpu'),d.cpu);
-    pct(document.getElementById('r-ram'),d.ram);
-    pct(document.getElementById('r-vram'),d.vram);
-    pct(document.getElementById('r-gpu'),d.gpu);
   }).catch(function(){ clearTimeout(tidS); });
   function bootModelsFromApi(){
     setTimeout(function(){
@@ -1449,6 +1498,20 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   </div>
 
   <section class="dash-card dash-card--models-runtime" aria-labelledby="dash-models-h">
+    <div class="models-routing-bar" role="group" aria-labelledby="routing-mode-heading">
+      <div class="models-routing-bar-text">
+        <span class="models-routing-bar-title" id="routing-mode-heading">API routing mode</span>
+        <span class="models-routing-bar-hint">Hybrid follows your thresholds and keywords; Claude only or Ollama only force every request that way. Click to cycle modes.</span>
+      </div>
+      <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode--${routingModeInitial}" id="routing-mode-btn" title="Click to cycle: Hybrid → Claude only → Ollama only" aria-label="Routing mode: ${routingModeLabel.replace(/"/g, '&quot;')}">${routingModeLabel}</button>
+    </div>
+    <h3 class="dash-subsection-title" id="dash-ollama-runtime-h">Ollama runtime</h3>
+    <p class="pool-explainer" style="margin-top:4px;margin-bottom:8px">Models currently in GPU memory from Ollama <span class="inline-code">/api/ps</span>. Each card has Restart / Stop / Info / Settings controls. Use <strong>Start</strong> below when no model is loaded.</p>
+    <div class="svc-btns vram-model-actions" id="vram-global-actions" style="margin-bottom:10px" role="group" aria-label="Load default model in Ollama">
+      <button type="button" class="svc-btn start" id="btn-m-start" title="Load configured default model into VRAM" onclick="void modelAction('/api/router/model/start')">&#9654; Start default</button>
+    </div>
+    <p class="params-sub pool-hint-line" id="vram-default-hint" style="display:none;margin-bottom:8px" role="status" aria-live="polite"></p>
+    <div id="vram-cards-root" class="model-cards-row row" role="list" aria-labelledby="dash-ollama-runtime-h"></div>
     <h2 class="dash-section-title" id="dash-models-h">Models &amp; routing</h2>
     <div class="models-toolbar-row">
       <div class="models-toolbar-default">
@@ -1681,27 +1744,82 @@ function applyRoutingModeButton(m){
   routingMode=s;
   var b=document.getElementById('routing-mode-btn');
   if(!b)return;
-  b.className='routing-mode-btn routing-mode--'+s;
+  b.className='routing-mode-btn routing-mode-btn--section routing-mode--'+s;
   b.textContent=s==='cloud'?'Claude only':s==='local'?'Ollama only':'Hybrid';
   b.setAttribute('aria-label','Routing mode: '+(s==='cloud'?'Claude API only':s==='local'?'Ollama only':'Hybrid (smart local + Claude when needed)'));
 }
+/** Same pattern as ollama-dashboard app/static/js/main.js (timelineData + drawTimeline): fixed canvas width/height attrs, draw on each stats fetch. */
 const sparkData={cpu:[],ram:[],vram:[],gpu:[]};
-function drawSpark(id,data,color){
-  const c=document.getElementById(id); if(!c)return;
-  const w=c.offsetWidth||200, h=12;
-  c.width=w; c.height=h;
-  const ctx=c.getContext('2d');
-  ctx.clearRect(0,0,w,h);
-  if(data.length<2)return;
-  const max=Math.max(...data,1), step=w/(data.length-1);
-  ctx.beginPath();
-  data.forEach((v,i)=>{ const x=i*step, y=h-(v/max)*h*.9; i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
-  ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.stroke();
-  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
-  ctx.fillStyle=color.replace('rgb','rgba').replace(')',',0.15)');
-  try{ctx.fill();}catch{}
+const MAX_SPARK_POINTS=60;
+const SPARK_COLOR_CPU='#3b82f6';
+const SPARK_COLOR_RAM='#22c55e';
+const SPARK_COLOR_VRAM='#06b6d4';
+const SPARK_COLOR_GPU='#f59e0b';
+function hexToFillRgba(hex,a){
+  try{
+    const m=/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(String(hex||''));
+    if(m) return 'rgba('+parseInt(m[1],16)+','+parseInt(m[2],16)+','+parseInt(m[3],16)+','+a+')';
+  }catch(_){}
+  return 'rgba(59,130,246,'+a+')';
 }
-function pushSpark(key,val){ const d=sparkData[key]; d.push(val||0); if(d.length>30)d.shift(); }
+function drawResourceTimeline(canvas,data,colorHex){
+  if(!canvas||!data||data.length<2)return;
+  const ctx=canvas.getContext('2d');
+  if(!ctx)return;
+  const width=canvas.width;
+  const height=canvas.height;
+  ctx.clearRect(0,0,width,height);
+  var grid=document.documentElement.classList.contains('light')?'rgba(0,0,0,0.08)':'rgba(255,255,255,0.1)';
+  ctx.strokeStyle=grid;
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(0,height*0.25); ctx.lineTo(width,height*0.25);
+  ctx.moveTo(0,height*0.5); ctx.lineTo(width,height*0.5);
+  ctx.moveTo(0,height*0.75); ctx.lineTo(width,height*0.75);
+  ctx.stroke();
+  ctx.fillStyle=hexToFillRgba(colorHex,0.3);
+  ctx.beginPath();
+  ctx.moveTo(0,height);
+  const stepX=width/(data.length-1);
+  for(let i=0;i<data.length;i++){
+    const x=i*stepX;
+    const v=Math.max(0,Math.min(100,Number(data[i])||0));
+    const y=height-(v/100)*height;
+    ctx.lineTo(x,y);
+  }
+  ctx.lineTo(width,height);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle=colorHex;
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  for(let i=0;i<data.length;i++){
+    const x=i*stepX;
+    const v=Math.max(0,Math.min(100,Number(data[i])||0));
+    const y=height-(v/100)*height;
+    if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  const last=Math.max(0,Math.min(100,Number(data[data.length-1])||0));
+  const cx=(data.length-1)*stepX;
+  const cy=height-(last/100)*height;
+  ctx.fillStyle=colorHex;
+  ctx.beginPath();
+  ctx.arc(cx,cy,3,0,2*Math.PI);
+  ctx.fill();
+}
+function redrawAllSparks(){
+  drawResourceTimeline(document.getElementById('spark-cpu'),sparkData.cpu,SPARK_COLOR_CPU);
+  drawResourceTimeline(document.getElementById('spark-ram'),sparkData.ram,SPARK_COLOR_RAM);
+  drawResourceTimeline(document.getElementById('spark-vram'),sparkData.vram,SPARK_COLOR_VRAM);
+  drawResourceTimeline(document.getElementById('spark-gpu'),sparkData.gpu,SPARK_COLOR_GPU);
+}
+function pushSpark(key,val){
+  const d=sparkData[key];
+  const n=Number(val);
+  d.push(Number.isFinite(n)?Math.max(0,Math.min(100,n)):0);
+  if(d.length>MAX_SPARK_POINTS)d.shift();
+}
 
 // ── System stats ───────────────────────────────────────────────────────────
 function applySystemStatsToDom(d){
@@ -1717,17 +1835,19 @@ function applySystemStatsToDom(d){
   pct(document.getElementById('r-vram'),d.vram);
   pct(document.getElementById('r-gpu'),d.gpu);
 }
+function ingestSystemStatsPayload(d){
+  if(!d||typeof d!=='object')return;
+  applySystemStatsToDom(d);
+  pushSpark('cpu',d.cpu); pushSpark('ram',d.ram); pushSpark('vram',d.vram); pushSpark('gpu',d.gpu);
+  redrawAllSparks();
+}
+window.__claudeHybridIngestSystemStats=ingestSystemStatsPayload;
 async function refreshStats(){
   try{
     const r=await fetchWithTimeout('/api/system-stats',15000);
     if(!r.ok)return;
     const d=await r.json();
-    applySystemStatsToDom(d);
-    pushSpark('cpu',d.cpu); pushSpark('ram',d.ram); pushSpark('vram',d.vram||0); pushSpark('gpu',d.gpu||0);
-    drawSpark('spark-cpu',sparkData.cpu,'rgb(96,165,250)');
-    drawSpark('spark-ram',sparkData.ram,'rgb(167,139,250)');
-    drawSpark('spark-vram',sparkData.vram,'rgb(34,197,94)');
-    drawSpark('spark-gpu',sparkData.gpu,'rgb(251,191,36)');
+    ingestSystemStatsPayload(d);
   }catch{}
 }
 
@@ -1963,12 +2083,11 @@ function vramNamesMatch(cfg, psName){
   return sa===sb || a===sb || sa===b;
 }
 function setVramActionButtons(d){
-  const st=document.getElementById('btn-m-start'), sp=document.getElementById('btn-m-stop'), sr=document.getElementById('btn-m-restart');
+  const globalBar=document.getElementById('vram-global-actions');
   const hasAny=Array.isArray(d.loaded_list)&&d.loaded_list.length>0;
-  const cfgLoaded=!!d.configured_loaded;
-  if(st) st.disabled=cfgLoaded;
-  if(sp) sp.disabled=!hasAny;
-  if(sr) sr.disabled=false;
+  if(globalBar) globalBar.style.display=hasAny?'none':'';
+  const st=document.getElementById('btn-m-start');
+  if(st) st.disabled=!!d.configured_loaded;
 }
 function specItem(iconChar, label, value, title){
   const row=document.createElement('div');
@@ -1993,29 +2112,34 @@ function specItem(iconChar, label, value, title){
   row.appendChild(ic); row.appendChild(ct);
   return row;
 }
-function buildVramLoadedCardCompact(col, row, d){
+function buildVramLoadedCard(col, row, d){
+  const name=row.name||'';
+  const isDefault=vramNamesMatch(d.configured_model, name);
+  const cs=row.card_specs||(isDefault?d.card_specs:null)||{};
+  const caps=row.capabilities||(isDefault?d.capabilities:null)||{};
   const card=document.createElement('div');
-  card.className='model-card h-100 loaded vram-card-compact';
-  card.dataset.modelName=row.name;
+  card.className='model-card h-100 loaded';
+  card.dataset.modelName=name;
+
+  /* ── Header ── */
   const head=document.createElement('div');
   head.className='model-header model-card-head';
   const iw=document.createElement('div');
   iw.className='model-icon-wrapper';
   iw.setAttribute('aria-hidden','true');
   iw.innerHTML='<span class="model-icon-main"><i class="fas fa-brain" aria-hidden="true"></i></span>';
-  const body=document.createElement('div');
-  body.className='model-card-head-body';
+  const hbody=document.createElement('div');
+  hbody.className='model-card-head-body';
   const nr=document.createElement('div');
   nr.className='model-card-head-name-row';
-  const title=document.createElement('div');
-  title.className='model-title';
+  const titleEl=document.createElement('div');
+  titleEl.className='model-title';
   const disp=document.createElement('span');
   disp.className='model-title-display';
   const full=document.createElement('span');
   full.className='model-title-full';
-  full.textContent=row.name||'\u2014';
-  disp.appendChild(full);
-  title.appendChild(disp);
+  full.textContent=name||'\u2014';
+  disp.appendChild(full); titleEl.appendChild(disp);
   const trail=document.createElement('div');
   trail.className='model-card-head-trail';
   trail.setAttribute('aria-label','Model status');
@@ -2025,85 +2149,89 @@ function buildVramLoadedCardCompact(col, row, d){
   pill.className='status-indicator running';
   pill.innerHTML='<span>Loaded</span>';
   meta.appendChild(pill);
-  if(vramNamesMatch(d.configured_model, row.name)){
-    const b=document.createElement('span');
-    b.className='model-list-badge default';
-    b.style.marginLeft='8px';
-    b.textContent='Default';
-    b.title='Router default model';
-    meta.appendChild(b);
-  }
   trail.appendChild(meta);
-  nr.appendChild(title); nr.appendChild(trail);
-  body.appendChild(nr);
-  head.appendChild(iw); head.appendChild(body);
-  const specs=document.createElement('div');
-  specs.className='model-specs';
-  const r1=document.createElement('div');
-  r1.className='spec-row';
-  r1.appendChild(specItem('\u{1F5A5}','VRAM',fmtBytes(row.size_vram),'From Ollama /api/ps'));
-  if(row.digest){
-    const dg=document.createElement('div');
-    dg.className='vram-digest';
-    dg.textContent=String(row.digest).slice(0, 20)+(String(row.digest).length>20?'…':'');
-    dg.title=row.digest;
-    specs.appendChild(r1);
-    specs.appendChild(dg);
-  } else {
-    specs.appendChild(r1);
+  const aside=document.createElement('div');
+  aside.className='model-card-head-aside';
+  aside.setAttribute('aria-label','Capabilities');
+  const capsDiv=document.createElement('div');
+  capsDiv.className='model-capabilities';
+  const capDefs=[['has_reasoning','fa-brain','Reasoning'],['has_vision','fa-image','Vision'],['has_tools','fa-tools','Tools']];
+  for(const [key,icon,label] of capDefs){
+    const sp=document.createElement('span');
+    const v=caps[key];
+    sp.className='capability-icon '+(v===true?'enabled':v===false?'disabled':'unknown');
+    sp.title=label+': '+(v===true?'Available':v===false?'Not available':'Unknown');
+    sp.innerHTML='<i class="fas '+icon+'" aria-hidden="true"></i>';
+    capsDiv.appendChild(sp);
   }
-  card.appendChild(head);
-  card.appendChild(specs);
-  col.appendChild(card);
-}
-function buildVramLoadedCardFull(col, row, d){
-  const m=d.model||{};
-  const cs=d.card_specs||{};
-  const card=document.createElement('div');
-  card.className='model-card h-100 loaded';
-  card.dataset.modelName=row.name||'';
-  const head=document.createElement('div');
-  head.className='model-header model-card-head';
-  head.innerHTML='<div class="model-icon-wrapper" aria-hidden="true"><span class="model-icon-main"><i class="fas fa-brain" aria-hidden="true"></i></span></div><div class="model-card-head-body"><div class="model-card-head-name-row"><div class="model-title"><span class="model-title-display"><span class="model-title-full" id="mc-name"></span></span></div><div class="model-card-head-trail" aria-label="Model status"><div class="model-meta"><span class="status-indicator running" id="mc-status-pill"><span id="mc-status">Loaded</span></span></div><div class="model-card-head-aside" aria-label="Capabilities"><div class="model-capabilities"><span class="capability-icon unknown" id="cap-reasoning" title="Reasoning"><i class="fas fa-brain" aria-hidden="true"></i></span><span class="capability-icon unknown" id="cap-vision" title="Image processing"><i class="fas fa-image" aria-hidden="true"></i></span><span class="capability-icon unknown" id="cap-tools" title="Tool usage"><i class="fas fa-tools" aria-hidden="true"></i></span></div></div></div></div></div>';
-  head.querySelector('#mc-name').textContent=row.name||m.name||m.model||'\u2014';
+  aside.appendChild(capsDiv);
+  trail.appendChild(aside);
+  nr.appendChild(titleEl); nr.appendChild(trail);
+  hbody.appendChild(nr);
+  head.appendChild(iw); head.appendChild(hbody);
+
+  /* ── Specs grid (3 rows × 2 cols matching Ollama Dashboard) ── */
   const specs=document.createElement('div');
   specs.className='model-specs';
-  specs.id='mc-specs';
   const mkRow=(a,b)=>{ const r=document.createElement('div'); r.className='spec-row'; r.appendChild(a); r.appendChild(b); return r; };
-  const fam=(cs&&cs.family)||m.details?.family||'\u2014';
-  const par=(cs&&cs.parameter_size)||m.details?.parameter_size||'\u2014';
-  const qua=(cs&&cs.quantization_level)||m.details?.quantization_level||'\u2014';
-  const sz=(cs&&cs.size!=null)?cs.size:m.size;
-  const sv=(cs&&cs.size_vram!=null)?cs.size_vram:m.size_vram;
+  const fam=cs.family||'\u2014';
+  const par=cs.parameter_size||'\u2014';
+  const sz=cs.size!=null?cs.size:row.size;
+  const sv=row.size_vram;
   const szN=typeof sz==='number'?sz:Number(sz);
   const svN=typeof sv==='number'?sv:Number(sv);
-  const vp=Number.isFinite(szN)&&szN>0&&Number.isFinite(svN)?Math.round(svN/szN*100):0;
-  const vramTxt=fmtBytes(sv)+(vp?' ('+vp+'%)':'');
-  const r1=document.createElement('div'); r1.className='spec-row';
-  const i1=specItem('\u2699','Family',fam||'\u2014'); i1.querySelector('.spec-value').id='mc-family';
-  const i2=specItem('\u2696','Parameters',par||'\u2014'); i2.querySelector('.spec-value').id='mc-params';
-  r1.appendChild(i1); r1.appendChild(i2);
-  const r2=document.createElement('div'); r2.className='spec-row';
-  const i3=specItem('\u{1F4BE}','Quant',qua||'\u2014'); i3.querySelector('.spec-value').id='mc-quant';
-  const i4=specItem('\u{1F4E6}','Disk size',fmtBytes(sz)); i4.querySelector('.spec-value').id='mc-size';
-  r2.appendChild(i3); r2.appendChild(i4);
-  const r3=document.createElement('div'); r3.className='spec-row';
-  const i5=specItem('\u{1F3AE}','VRAM used',vramTxt); i5.querySelector('.spec-value').id='mc-vram';
-  const i6=specItem('\u{1F4C8}','Max context',fmtCtxTok(d.context_max)); i6.querySelector('.spec-value').id='mc-ctx-max'; i6.querySelector('.spec-value').title='From model metadata (Ollama show)';
-  r3.appendChild(i5); r3.appendChild(i6);
-  const r4=document.createElement('div'); r4.className='spec-row';
-  const i7=specItem('\u2194','Allocated',fmtCtxTok(d.context_allocated)); i7.querySelector('.spec-value').id='mc-ctx-alloc'; i7.querySelector('.spec-value').title='Context for loaded process (Ollama /api/ps)';
-  const i8=specItem('\u26A1','Router request',fmtCtxTok(d.request_num_ctx)); const sv8=i8.querySelector('.spec-value'); sv8.id='mc-ctx-req'; sv8.classList.add('js-vram-router-req'); sv8.title='Effective num_ctx for next local completion';
-  r4.appendChild(i7); r4.appendChild(i8);
-  specs.appendChild(r1); specs.appendChild(r2); specs.appendChild(r3); specs.appendChild(r4);
-  const none=document.createElement('p');
-  none.className='no-model-banner';
-  none.id='mc-none';
-  none.style.display='none';
-  none.innerHTML='No model loaded in Ollama. Use <strong>Start</strong> or load the model from the CLI.';
+  const vp=Number.isFinite(szN)&&szN>0&&Number.isFinite(svN)?(svN/szN*100).toFixed(1):0;
+  const gpuTxt=vp+'% ('+fmtBytes(sv)+')';
+  const ctxMax=row.context_max!=null?row.context_max:d.context_max;
+  const ctxAlloc=row.context_allocated!=null?row.context_allocated:d.context_allocated;
+  specs.appendChild(mkRow(specItem('\u2699','Family',fam),specItem('\u2696','Parameters',par)));
+  specs.appendChild(mkRow(specItem('\u{1F4BE}','Size',fmtBytes(sz)),specItem('\u{1F4A0}','GPU Allocation',gpuTxt)));
+  specs.appendChild(mkRow(specItem('\u{1F4C8}','Max context',fmtCtxTok(ctxMax)),specItem('\u2194','Allocated',fmtCtxTok(ctxAlloc))));
+
+  /* ── Action buttons (Ollama Dashboard style: Restart / Stop / Info / Settings+Default / …) ── */
+  const actions=document.createElement('div');
+  actions.className='model-actions model-actions--running hybrid-model-actions-5';
+  function mcBtn(cls,iconCls,label,title,handler){
+    const b=document.createElement('button');
+    b.type='button'; b.className='btn '+cls; b.title=title;
+    b.innerHTML='<i class="fas '+iconCls+'" aria-hidden="true"></i> <span class="model-action-btn-label">'+label+'</span>';
+    b.addEventListener('click',handler);
+    return b;
+  }
+  actions.appendChild(mcBtn('btn-primary','fa-redo','Restart','Reload this model in VRAM (applies updated settings)',()=>cardModelAction('/api/router/model/restart',name)));
+  actions.appendChild(mcBtn('btn-warning','fa-stop','Stop','Unload from VRAM (ollama stop)',()=>cardModelAction('/api/router/model/stop',name)));
+  actions.appendChild(mcBtn('btn-info','fa-info-circle','Info','Model details (JSON)',()=>openCardModelInfo(name)));
+  const settingsBtn=document.createElement('button');
+  settingsBtn.type='button';
+  settingsBtn.className='btn btn-secondary model-action-settings-btn';
+  settingsBtn.title='Generation settings';
+  settingsBtn.innerHTML='<span class="model-action-settings-inner"><i class="fas fa-cog" aria-hidden="true"></i> <span class="model-action-btn-label">Settings</span>'
+    +'<span class="badge rounded-pill model-settings-badge model-settings-badge--'+(isDefault?'default':'set')+'">'
+    +(isDefault?'Default':'')+'</span></span>';
+  settingsBtn.addEventListener('click',()=>openSettingsModal());
+  actions.appendChild(settingsBtn);
+
+  /* "…" overflow menu */
+  const moreMenu=document.createElement('div');
+  moreMenu.className='model-card-more-menu';
+  moreMenu.hidden=true;
+  function mmItem(label,handler){
+    const b=document.createElement('button'); b.type='button'; b.textContent=label;
+    b.addEventListener('click',handler); return b;
+  }
+  moreMenu.appendChild(mmItem('Copy model name',()=>navigator.clipboard.writeText(name)));
+  moreMenu.appendChild(mmItem('Copy ollama run',()=>navigator.clipboard.writeText('ollama run '+name)));
+  if(!isDefault){
+    moreMenu.appendChild(document.createElement('hr'));
+    moreMenu.appendChild(mmItem('Set as default model',()=>setAsDefaultModel(name)));
+  }
+  const moreBtn=mcBtn('btn-outline-secondary','fa-ellipsis-h','','More options',()=>{ moreMenu.hidden=!moreMenu.hidden; });
+  actions.appendChild(moreBtn);
+
   card.appendChild(head);
   card.appendChild(specs);
-  card.appendChild(none);
+  card.appendChild(actions);
+  card.appendChild(moreMenu);
   col.appendChild(card);
 }
 /** Compact empty state when Ollama has nothing in GPU memory (no fake “model card”). */
@@ -2113,32 +2241,14 @@ function buildVramEmptyState(root, d){
   wrap.setAttribute('role','status');
   const title=document.createElement('div');
   title.className='vram-empty-title';
-  title.textContent='No model loaded in GPU memory';
+  title.textContent='No model running';
   const sub=document.createElement('div');
   sub.className='vram-empty-sub';
   const cfg=String(d.configured_model||'').trim();
-  if(cfg) sub.textContent='Default is set to \u201c'+cfg+'\u201d. Use Start below, or pick another default above.';
-  else sub.textContent='Choose a default model above, then use Start to load it.';
-  const ctx=document.createElement('div');
-  ctx.className='vram-empty-ctx';
-  ctx.append('Max context ');
-  const mx=document.createElement('span');
-  mx.textContent=fmtCtxTok(d.context_max);
-  ctx.appendChild(mx);
-  ctx.append(' \u00b7 Next request ');
-  const rq=document.createElement('span');
-  rq.className='js-vram-router-req';
-  rq.id='mc-ctx-req';
-  rq.textContent=fmtCtxTok(d.request_num_ctx);
-  rq.title='Effective num_ctx for next local completion';
-  ctx.appendChild(rq);
-  const note=document.createElement('div');
-  note.className='vram-empty-note';
-  note.textContent='Header VRAM % can stay above 0 with no model loaded (GPU driver / Ollama baseline).';
+  if(cfg) sub.textContent='Press Start to load your model and begin using local AI.';
+  else sub.textContent='Choose a model above, then press Start.';
   wrap.appendChild(title);
   wrap.appendChild(sub);
-  wrap.appendChild(ctx);
-  wrap.appendChild(note);
   root.appendChild(wrap);
 }
 function buildVramConfiguredIdleAside(root, d){
@@ -2196,9 +2306,7 @@ function renderVramSection(d){
     const col=document.createElement('div');
     col.className='col';
     col.setAttribute('role','listitem');
-    const full=vramNamesMatch(cfg, row.name)&&d.loaded&&d.model;
-    if(full) buildVramLoadedCardFull(col, row, d);
-    else buildVramLoadedCardCompact(col, row, d);
+    buildVramLoadedCard(col, row, d);
     root.appendChild(col);
   }
   if(!d.configured_loaded&&cfg){
@@ -2262,6 +2370,66 @@ async function modelAction(url){
     await syncGenerationSlidersFromServer();
     await refreshHealth();
     void burstRefreshAfterModelAction();
+  }catch{}
+}
+async function cardModelAction(url,modelName){
+  try{
+    await routerFetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:modelName})});
+    await new Promise(x=>setTimeout(x,500));
+    await refreshModel();
+    await syncGenerationSlidersFromServer();
+    await refreshHealth();
+    void burstRefreshAfterModelAction();
+  }catch{}
+}
+function openCardModelInfo(modelName){
+  const modal=document.getElementById('model-info-modal');
+  if(!modal)return;
+  infoRawVisible=false;
+  const pre=document.getElementById('model-info-pre');
+  const btn=document.getElementById('info-toggle-raw');
+  if(pre){pre.hidden=true;pre.textContent='';}
+  if(btn)btn.textContent='Show raw JSON';
+  document.getElementById('info-hero-name').textContent='Loading\u2026';
+  document.getElementById('info-hero-meta').textContent='';
+  document.getElementById('info-cards').innerHTML='';
+  document.getElementById('info-opt-grid').innerHTML='';
+  modal.hidden=false;
+  fetch('/api/router/model-details?model='+encodeURIComponent(modelName)).then(r=>r.json()).then(j=>{
+    window.__lastModelDetails=j;
+    document.getElementById('info-hero-name').textContent=j.model||'\u2014';
+    const s=j.summary;
+    const metaEl=document.getElementById('info-hero-meta');
+    if(metaEl)metaEl.textContent=s?[s.family,s.parameter_size,s.quantization_level].filter(Boolean).join(' \u00b7 '):'';
+    const cards=document.getElementById('info-cards');
+    cards.innerHTML='';
+    if(s){
+      const items=[['Family',s.family],['Parameters',s.parameter_size],['Quantization',s.quantization_level],['Format',s.format],['Max context',s.context_max!=null?s.context_max.toLocaleString()+' tokens':null],['License',s.license],['Modified',s.modified_at]];
+      for(const [lab,val] of items){
+        if(val==null||val==='')continue;
+        const card=document.createElement('div');card.className='info-card';
+        card.innerHTML='<div class="info-card-lbl">'+escHtml(lab)+'</div><div class="info-card-val">'+escHtml(String(val))+'</div>';
+        cards.appendChild(card);
+      }
+    }
+    const og=document.getElementById('info-opt-grid');og.innerHTML='';
+    const ro=j.router_request_options||{};
+    const keys=['temperature','top_p','top_k','num_ctx','num_predict','repeat_penalty','seed'];
+    for(const k of keys){
+      if(ro[k]===undefined)continue;
+      const chip=document.createElement('div');chip.className='info-opt-chip';
+      chip.innerHTML='<span>'+escHtml(k.replace(/_/g,' '))+'</span>'+escHtml(String(ro[k]));
+      og.appendChild(chip);
+    }
+  }).catch(()=>{document.getElementById('info-hero-name').textContent='Failed to load';});
+}
+async function setAsDefaultModel(modelName){
+  try{
+    await routerFetch('/api/local-model',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:modelName})});
+    const sel=document.getElementById('local-model-select');
+    if(sel)sel.value=modelName;
+    await refreshModel();
+    await refreshOllamaModelList();
   }catch{}
 }
 
@@ -2866,19 +3034,15 @@ function initDashboardPollTicker(){
     }catch(_){}
   },1000);
 }
-/** Dedicated cadence for CPU/RAM/VRAM/GPU (faster than model poll); server serializes CPU samples and caches nvidia-smi ~5s. */
-var SYSTEM_STATS_POLL_MS=2000;
+/** Dedicated cadence for CPU/RAM/VRAM/GPU (1s UI tick; model poll stays on data-poll-interval). Server serializes CPU deltas; nvidia-smi cached ~5s so GPU/VRAM may repeat until cache expires. */
+var SYSTEM_STATS_POLL_MS=1000;
 function initSystemStatsPoller(){
   try{
-    function tickStats(){
-      if(document.visibilityState!=='visible')return;
-      void refreshStats();
+    async function pollLoop(){
+      try{ await refreshStats(); }catch(_){}
+      setTimeout(function(){ void pollLoop(); }, SYSTEM_STATS_POLL_MS);
     }
-    setTimeout(tickStats,500);
-    setInterval(tickStats,SYSTEM_STATS_POLL_MS);
-    document.addEventListener('visibilitychange',function(){
-      if(document.visibilityState==='visible')tickStats();
-    });
+    void pollLoop();
   }catch(_){}
 }
 function hydrateLogEntriesBatched(raw){
@@ -3212,6 +3376,7 @@ const server = http.createServer(async (req, res) => {
         tokenThreshold: CFG.routing.tokenThreshold,
         fileReadThreshold: CFG.routing.fileReadThreshold,
         keywordCount: CFG.routing.keywords.length,
+        routing_keywords: CFG.routing.keywords,
         routing_mode: normalizeRoutingMode(CFG.routing.mode),
       },
     }));
@@ -3391,13 +3556,26 @@ const server = http.createServer(async (req, res) => {
       return { ...m, details: enrichDetailsFromModelInfo(m.details || {}, show) };
     })() : null;
     const card_specs = buildCardSpecs(show, running);
-    const loaded_list = psRows.map((row) => ({
-      name: psModelId(row),
-      model: String(row.model || row.name || '').trim(),
-      size: toFiniteNumberLoose(row.size),
-      size_vram: toFiniteNumberLoose(row.size_vram),
-      digest: row.digest != null ? String(row.digest) : null,
-    })).filter((e) => e.name);
+    const loaded_list = [];
+    for (const row of psRows) {
+      const nm = psModelId(row);
+      if (!nm) continue;
+      const rowShow = (nm === showName) ? show : await ollamaPost('/api/show', { model: nm });
+      const rowSpecs = buildCardSpecs(rowShow, row);
+      const rowCaps = capabilityFlagsFromShow(rowShow);
+      loaded_list.push({
+        name: nm,
+        model: String(row.model || row.name || '').trim(),
+        size: toFiniteNumberLoose(row.size),
+        size_vram: toFiniteNumberLoose(row.size_vram),
+        digest: row.digest != null ? String(row.digest) : null,
+        card_specs: rowSpecs,
+        capabilities: rowCaps,
+        context_max: maxContextFromShow(rowShow),
+        context_allocated: contextAllocatedFromPsRow(row),
+        request_num_ctx: effectiveParamsFor(nm).num_ctx,
+      });
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     const effModel = running ? psModelId(running) : CFG.local.model;
     const eff = effectiveParamsFor(effModel);
@@ -3511,16 +3689,20 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && reqPath === '/api/router/model/restart') {
     if (!requireAdmin(req, res)) return;
+    let body = {};
+    try { body = JSON.parse((await readBody(req)).toString() || '{}'); } catch { body = {}; }
+    const explicit = body.model && String(body.model).trim();
+    const target = explicit || CFG.local.model;
     const ps = await ollamaGetPsWithRetry();
-    const matched = pickRunningModel(ps, CFG.local.model);
+    const matched = pickRunningModel(ps, target);
     const row = matched || firstLoadedPsRow(ps);
     if (row) {
       await ollamaTouchModel(psModelId(row), 0);
       await new Promise(r => setTimeout(r, 800));
     }
-    await ollamaTouchModel(CFG.local.model, -1);
+    await ollamaTouchModel(target, -1);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, model: CFG.local.model }));
+    res.end(JSON.stringify({ ok: true, model: target }));
     return;
   }
 
