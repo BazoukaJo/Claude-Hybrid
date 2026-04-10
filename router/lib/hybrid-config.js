@@ -2,6 +2,7 @@
 const fs = require("fs");
 const path = require("path");
 const { normalizeRoutingMode } = require("./routing-logic");
+const { normalizeTimeZone } = require("./time-format");
 
 const CONFIG_BASENAME = "hybrid.config.json";
 
@@ -54,6 +55,12 @@ function applyUserConfig(CFG, user) {
     }
     if (Object.prototype.hasOwnProperty.call(r, "mode")) {
       CFG.routing.mode = normalizeRoutingMode(r.mode);
+    }
+  }
+  if (user.display && typeof user.display === "object") {
+    const d = user.display;
+    if (Object.prototype.hasOwnProperty.call(d, "time_zone")) {
+      CFG.display.time_zone = normalizeTimeZone(d.time_zone);
     }
   }
   if (user.privacy && typeof user.privacy === "object") {

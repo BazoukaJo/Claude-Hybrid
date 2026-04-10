@@ -4,8 +4,10 @@
   "scripts": {
     "start": "node router/server.js",
     "merge-env": "node scripts/merge-claude-hybrid-env.js",
+    "revert-env": "node scripts/revert-claude-hybrid-env.js",
     "diagnose": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/diagnose-claude-hybrid.ps1",
-    "test": "node --test tests/model-utils.test.cjs tests/routing-logic.test.cjs tests/routing-threshold-bounds.test.cjs tests/daily-routing-scenarios.test.cjs tests/local-model-picker.test.cjs tests/auto-default-models.test.cjs tests/ollama-enrich-cap.test.cjs tests/ollama-model-presets.test.cjs tests/cloud-fallback.test.cjs tests/privacy-redactor.test.cjs tests/privacy-cloud-http.test.cjs tests/router-health.test.cjs tests/router-http.test.cjs tests/router-admin-http.test.cjs tests/dashboard-recent-smoke.cjs tests/dashboard-inline-script-syntax.cjs",
+    "diagnose:strict": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-routed-session.ps1",
+    "test": "node --test tests/model-utils.test.cjs tests/routing-logic.test.cjs tests/routing-threshold-bounds.test.cjs tests/daily-routing-scenarios.test.cjs tests/local-model-picker.test.cjs tests/auto-default-models.test.cjs tests/ollama-enrich-cap.test.cjs tests/ollama-model-presets.test.cjs tests/cloud-fallback.test.cjs tests/privacy-redactor.test.cjs tests/privacy-cloud-http.test.cjs tests/router-health.test.cjs tests/router-http.test.cjs tests/router-admin-http.test.cjs tests/time-format.test.cjs tests/dashboard-recent-smoke.cjs tests/dashboard-inline-script-syntax.cjs",
     "test:e2e-ui": "node tests/e2e-ui-screenshots.cjs",
     "test:all": "npm test && npm run test:e2e-ui",
     "docker:build": "docker build -t claude-hybrid-router .",

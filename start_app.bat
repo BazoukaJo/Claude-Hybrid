@@ -26,6 +26,13 @@ if defined PORT_PID (
   for /f "tokens=1 delims=," %%I in ('tasklist /FI "PID eq %PORT_PID%" /FO CSV /NH 2^>nul') do set "PORT_IMG=%%~I"
   if /I "%PORT_IMG%"=="node.exe" (
     echo Claude Hybrid router is already listening on port %ROUTER_PORT% ^(PID %PORT_PID%^).
+    echo Syncing hybrid env ^(merge-claude-hybrid-env^)...
+    node "%~dp0scripts\merge-claude-hybrid-env.js"
+    if errorlevel 1 (
+      echo ERROR: merge-claude-hybrid-env.js failed while router is already running.
+      echo Run npm run merge-env manually, then retry.
+      exit /b 1
+    )
     exit /b 0
   )
   echo ERROR: Port %ROUTER_PORT% is already in use by PID %PORT_PID% ^(%PORT_IMG%^).
@@ -33,7 +40,13 @@ if defined PORT_PID (
   exit /b 1
 )
 
+echo Applying hybrid routing: ANTHROPIC_BASE_URL -^> http://127.0.0.1:%ROUTER_PORT% ^(Claude settings, User env, IDE terminals^)...
+node "%~dp0scripts\merge-claude-hybrid-env.js"
+if errorlevel 1 (
+  echo WARNING: merge-claude-hybrid-env.js failed. Starting router anyway; run npm run merge-env manually.
+)
+
 echo Starting Claude Hybrid Router (node router\server.js) on port %ROUTER_PORT% in this window...
-echo Press Ctrl+C to stop the server.
+echo Press Ctrl+C to stop the server. After exit, run stop_app.bat to point Claude back at cloud.
 node "%~dp0router\server.js"
 exit /b %ERRORLEVEL%

@@ -2,9 +2,30 @@
 
 Guidance for Claude Code (and similar agents) working in this repository.
 
+> **Read first:** Treat **[Core behavior](#core-behavior-read-first--prioritize-before-debugging)** as the contract for env + router lifecycle. Before concluding “routing is broken,” verify **client type** (Claude Code vs desktop app), whether **`ANTHROPIC_BASE_URL`** still targets this router (vs reverted / cloud), and that **dashboard routing mode** in **`hybrid.config.json`** only applies **after** traffic reaches the proxy. User-facing detail: **`README.md`** § _Core behavior (read this first)_.
+
+## Core behavior (read first — prioritize before debugging)
+
+### Two layers
+
+1. **`ANTHROPIC_BASE_URL`** + **`npm run merge-env`** / **`npm run revert-env`** (and Windows **`start_app.bat`** / **`stop_app.bat`**) determine whether **Claude Code** talks **to this router** or **directly to Anthropic**. If the client bypasses the router, **`hybrid.config.json`** and dashboard controls **do not apply** to that traffic.
+2. **`routing.mode`** (**Hybrid** / **Ollama only** / **Claude only**) and local-routing keys govern how the **router** splits work between **Ollama** and **Anthropic** for requests that **already hit** the proxy.
+
+### Lifecycle (keep env aligned with router state)
+
+- **Windows:** **`start_app.bat`** runs **`merge-env`** then starts **`node router/server.js`**. **`stop_app.bat`** stops the process and **by default** runs **`scripts/revert-hybrid-core.bat`** (clear kit proxy from **`~/.claude/settings.json`**, Cursor/VS Code **`terminal.integrated.env.*`**, User **`ANTHROPIC_BASE_URL`**). **`stop_app.bat keepenv`** stops without reverting.
+- **Manual `npm start`:** run **`npm run merge-env`** when enabling the proxy; **`npm run revert-env`** (and User env script if used) when returning to cloud-only.
+- **`setup.ps1 -Autostart`** / Startup shortcut: **`merge-env`** before background router spawn.
+
+### Clients
+
+**Claude Code** / IDE-integrated flows: use the proxy when env is merged. **Claude desktop Windows/Mac app:** normal chat does **not** use **`ANTHROPIC_BASE_URL`** — this router cannot see or route that traffic; **not a router defect**.
+
 ## What this project is
 
-A kit that routes Claude Code (and other Anthropic-API-compatible clients) between **local Ollama** and **Anthropic’s API** by task shape. After setup, the user runs `claude` normally; **`ANTHROPIC_BASE_URL`** points at this router.
+A kit that routes **Claude Code** (and other Anthropic-API-compatible clients) between **local Ollama** and **Anthropic’s API** by task shape. After setup, the user runs **`claude`** in a terminal (or uses Cursor/VS Code with the same env); **`ANTHROPIC_BASE_URL`** points at this router when the lifecycle above is applied.
+
+The **Claude consumer desktop Windows/Mac app** is summarized under **Core behavior** → **Clients** above.
 
 ## Architecture
 
@@ -27,16 +48,16 @@ The proxy maps Anthropic message/tool format to OpenAI-style bodies for Ollama, 
 
 ## UI surfaces
 
-| URL                      | Content                                                                                                                                                                                                                                                                                                                                             |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `http://127.0.0.1:8082/` | Main dashboard: routing-mode controls, local-first explainer, default model, pool / smart routing / speed-assist (auto-save on change), Ollama runtime, installed library (disk size + max context), generation sliders (auto-save), **Settings** / **Info** modals, supporter footer, and fixed footer router log. Content width capped (~1280px). |
-| `/header-ui`             | Preview: header, system metrics, log — links to `/` for full controls.                                                                                                                                                                                                                                                                              |
-| `/events`                | SSE stream of routing decisions. New clients immediately receive the current in-memory backlog.                                                                                                                                                                                                                                                     |
+| URL                      | Content                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `http://127.0.0.1:8082/` | Main dashboard: routing-mode controls, local-first explainer, default model, pool / smart routing / speed-assist (auto-save on change), Ollama runtime, installed library (disk size + max context), generation sliders (auto-save), **Settings** / **Info** modals, supporter footer, and fixed footer router log. Footer timestamps follow the configured local timezone. Content width capped (~1280px). |
+| `/header-ui`             | Preview: header, system metrics, log — links to `/` for full controls.                                                                                                                                                                                                                                                                                                                                      |
+| `/events`                | SSE stream of routing decisions. New clients immediately receive the current in-memory backlog.                                                                                                                                                                                                                                                                                                             |
 
 ## Config files
 
 - **`router/hybrid.config.json`** — Optional; created from **`router/hybrid.config.example.json`** by `setup.ps1` if missing. Watcher reloads on save.
-  Relevant keys: `listen.host`, **`local.model`**, **`local.models`**, **`local.smart_routing`**, **`local.fast_model`**, **`routing.mode`**, **`routing.tokenThreshold`**, **`routing.fileReadThreshold`**, **`routing.keywords`**, and **`privacy.cloud_redaction.*`**. Dashboard updates write the local-routing and routing-mode keys automatically.
+  Relevant keys: `listen.host`, **`display.time_zone`**, **`local.model`**, **`local.models`**, **`local.smart_routing`**, **`local.fast_model`**, **`routing.mode`**, **`routing.tokenThreshold`**, **`routing.fileReadThreshold`**, **`routing.keywords`**, and **`privacy.cloud_redaction.*`**. Dashboard updates write the local-routing and routing-mode keys automatically.
   If **`local.model`** or **`local.fast_model`** is **missing or empty**, the router **on startup** reads **`GET /api/tags`** and writes sensible defaults into the file (skip with **`ROUTER_SKIP_AUTO_DEFAULT_MODELS=1`**).
 - **`.claude/model-params.json`** — Global generation defaults (dashboard **Save** / **Generation settings**).
 - **`.claude/model-params-per-model.json`** — Per-model overrides.
@@ -45,16 +66,17 @@ Root **`.gitignore`** may exclude `router/hybrid.config.json` and some `.claude/
 
 ## Environment variables
 
-| Variable                          | Purpose                                                                                                        |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `ROUTER_HOST`                     | Bind address; default **`127.0.0.1`**. Use **`0.0.0.0`** only with care (LAN + consider `ROUTER_ADMIN_TOKEN`). |
-| `ROUTER_PORT` / `PORT`            | Listen port; default **8082**.                                                                                 |
-| `ROUTER_OLLAMA_HOST`              | Ollama HTTP host for the router (default **`localhost`**). In Docker Compose use the **Ollama** service name; with host Ollama use **`host.docker.internal`**. |
-| `ROUTER_OLLAMA_PORT`              | Ollama HTTP port (default **11434**).                                                                         |
-| `ROUTER_HYBRID_CONFIG`            | Absolute path to an alternate **`hybrid.config.json`** (see **`router/lib/hybrid-config.js`**).                 |
-| `ROUTER_ADMIN_TOKEN`              | If set, mutating **POST** routes require **`X-Router-Token`** or **`Authorization: Bearer`**.                  |
+| Variable                          | Purpose                                                                                                                                                                         |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ROUTER_HOST`                     | Bind address; default **`127.0.0.1`**. Use **`0.0.0.0`** only with care (LAN + consider `ROUTER_ADMIN_TOKEN`).                                                                  |
+| `ROUTER_PORT` / `PORT`            | Listen port; default **8082**.                                                                                                                                                  |
+| `ROUTER_OLLAMA_HOST`              | Ollama HTTP host for the router (default **`localhost`**). In Docker Compose use the **Ollama** service name; with host Ollama use **`host.docker.internal`**.                  |
+| `ROUTER_OLLAMA_PORT`              | Ollama HTTP port (default **11434**).                                                                                                                                           |
+| `ROUTER_HYBRID_CONFIG`            | Absolute path to an alternate **`hybrid.config.json`** (see **`router/lib/hybrid-config.js`**).                                                                                 |
+| `ROUTER_TIME_ZONE`                | Optional IANA timezone override for footer/log timestamps, e.g. **`America/Toronto`**. If unset, the router uses the configured file value or the local system timezone.        |
+| `ROUTER_ADMIN_TOKEN`              | If set, mutating **POST** routes require **`X-Router-Token`** or **`Authorization: Bearer`**.                                                                                   |
 | `ROUTER_PROXY_SOCKET_MS`          | Outbound **Anthropic / Ollama** proxy socket idle timeout (ms); resets when bytes move. Default **300000** (5 min). Set **0** to disable (can hang clients if upstream stalls). |
-| `ROUTER_SKIP_AUTO_DEFAULT_MODELS` | Skip startup auto-picking for `local.model` / `local.fast_model` when they are empty in config.                |
+| `ROUTER_SKIP_AUTO_DEFAULT_MODELS` | Skip startup auto-picking for `local.model` / `local.fast_model` when they are empty in config.                                                                                 |
 
 **Claude Code client env** (via `~/.claude/settings.json` and IDE terminal blocks) is updated by **`npm run merge-env`**: **`ANTHROPIC_BASE_URL`**, **`ENABLE_TOOL_SEARCH`**, and optionally **`ANTHROPIC_API_KEY`** if that variable is set in the shell when merge runs. Remove stored API key: **`ROUTER_REMOVE_CLAUDE_API_KEY=1`** with merge (see **`README.md`** quota section).
 
@@ -99,7 +121,7 @@ ollama pull gemma4:e4b
 # or: .\setup.ps1 -RoutingOnly
 ```
 
-Restart the IDE after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, Cursor/VS Code **`terminal.integrated.env.*`** with **`ANTHROPIC_BASE_URL`** + **`ENABLE_TOOL_SEARCH`**, and aligns User **`ANTHROPIC_BASE_URL`** with **`setup.ps1`**), then **fully quit** the IDE and reopen. On Windows, merge may run **`scripts/notify-environment-windows.ps1`** so User env changes propagate without a full reboot (best-effort). The **Claude consumer desktop app** is not the same integration path as Claude Code; prefer terminal **`claude`** or IDE extensions.
+Restart the IDE after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, Cursor/VS Code **`terminal.integrated.env.*`** with **`ANTHROPIC_BASE_URL`** + **`ENABLE_TOOL_SEARCH`**, and aligns User **`ANTHROPIC_BASE_URL`** with **`setup.ps1`**), then **fully quit** the IDE and reopen. On Windows, merge may run **`scripts/notify-environment-windows.ps1`** so User env changes propagate without a full reboot (best-effort). The **Claude consumer desktop Windows/Mac app** is not the same integration path as Claude Code; prefer terminal **`claude`** or IDE extensions.
 
 **Local deploy sanity:** **`npm start`** → dashboard **`http://127.0.0.1:8082/`**; **`npm run diagnose`** (Windows) checks port, listener, and settings. **`npm install`** is only required for **`npm test`** / Playwright, not for running the router.
 
@@ -112,7 +134,7 @@ Restart the Node router after changing **`router/server.js`** or **`router/lib/*
 ```powershell
 npm start
 # or: node router\server.js
-# Windows: start_app.bat / stop_app.bat / restart_app.bat; stop_app.bat revert (settings + User env); install_startup_shortcut.bat → Startup folder .lnk
+# Windows: start_app.bat (runs merge-env, then router); stop_app.bat (stops + reverts proxy in settings, IDE, User env; keepenv = stop only); restart_app.bat; install_startup_shortcut.bat → Startup folder .lnk
 $env:ANTHROPIC_BASE_URL = ""   # force cloud for this session
 claude
 [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
@@ -138,6 +160,7 @@ Recent coverage additions include privacy redaction unit tests and a router HTTP
 
 - Search (`rg`) before reading large files; avoid redundant full-file reads.
 - Default model / pool / thresholds live in **`hybrid.config.json`**; do not hardcode user paths in docs.
+- Do not debug hybrid routing until **Core behavior** is satisfied: correct client, merged vs reverted **`ANTHROPIC_BASE_URL`**, router actually listening on **`ROUTER_PORT`**.
 
 ## Hardware note (this kit’s reference machine)
 

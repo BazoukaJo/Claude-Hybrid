@@ -1,4 +1,6 @@
-'use strict';
+"use strict";
+
+const { formatClockTime } = require("./time-format");
 
 function createMetrics() {
   const m = {
@@ -17,15 +19,15 @@ function createMetrics() {
     },
     recordRoute(dest, reason, fallback, timeStr) {
       lastRoute = {
-        time: timeStr || new Date().toISOString().slice(11, 19),
+        time: timeStr || formatClockTime(new Date()),
         dest,
-        reason: String(reason || ''),
+        reason: String(reason || ""),
         fallback: !!fallback,
       };
       if (fallback) {
-        if (dest === 'cloud') m.fallback_to_cloud++;
+        if (dest === "cloud") m.fallback_to_cloud++;
         else m.fallback_to_local++;
-      } else if (dest === 'local') m.routed_local++;
+      } else if (dest === "local") m.routed_local++;
       else m.routed_cloud++;
     },
     getLastRoute() {

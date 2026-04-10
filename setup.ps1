@@ -16,21 +16,21 @@ param(
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
-$ProjectDir   = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$SetupPs      = Join-Path $ProjectDir "setup.ps1"
-$ShortcutLnk  = Join-Path $ProjectDir "Claude-Hybrid-Router-Startup.lnk"
-$PsExe        = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-$StartupFolder = [System.Environment]::GetFolderPath("Startup")
-$VbsPath      = Join-Path $StartupFolder "ClaudeHybridRouter.vbs"
+$ProjectDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$SetupPs = Join-Path $ProjectDir 'setup.ps1'
+$ShortcutLnk = Join-Path $ProjectDir 'Claude-Hybrid-Router-Startup.lnk'
+$PsExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$StartupFolder = [System.Environment]::GetFolderPath('Startup')
+$VbsPath = Join-Path $StartupFolder 'ClaudeHybridRouter.vbs'
 
 $ModelsToPull = @(
-    "VladimirGav/gemma4-26b-16GB-VRAM:latest",
-    "gemma4:e4b"
+    'VladimirGav/gemma4-26b-16GB-VRAM:latest',
+    'gemma4:e4b'
 )
 
-function Write-Step([string]$msg, [string]$color = "Gray") {
+function Write-Step([string]$msg, [string]$color = 'Gray') {
     Write-Host "  $msg" -ForegroundColor $color
 }
 
@@ -39,7 +39,8 @@ function Test-OllamaModelPresent([string]$modelName) {
     try {
         $null = & ollama show $modelName 2>&1
         return ($LASTEXITCODE -eq 0)
-    } catch {
+    }
+    catch {
         return $false
     }
 }
@@ -50,11 +51,13 @@ function Test-PortListening([int]$port) {
             $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
             return [bool]$c
         }
-    } catch {}
+    }
+    catch {}
     try {
         $line = netstat -ano | Select-String "^\s*TCP\s+\S+:$port\s+\S+\s+LISTENING\s+\d+\s*$" | Select-Object -First 1
         return [bool]$line
-    } catch {}
+    }
+    catch {}
     return $false
 }
 
@@ -64,31 +67,45 @@ function Get-ListeningPid8082 {
             $conn = Get-NetTCPConnection -LocalPort 8082 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($conn) { return [int]$conn.OwningProcess }
         }
-    } catch {}
+    }
+    catch {}
 
     try {
         $line = netstat -ano | Select-String '^\s*TCP\s+\S+:8082\s+\S+\s+LISTENING\s+(\d+)\s*$' | Select-Object -First 1
         if ($line -and $line.Matches.Count -gt 0) {
             return [int]$line.Matches[0].Groups[1].Value
         }
-    } catch {}
+    }
+    catch {}
 
     return $null
 }
 
+function Invoke-HybridEnvMerge {
+    $merge = Join-Path $ProjectDir 'scripts\merge-claude-hybrid-env.js'
+    if (-not (Test-Path $merge)) { return }
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) { return }
+    if (-not $env:ROUTER_PORT -or $env:ROUTER_PORT -eq '') { $env:ROUTER_PORT = '8082' }
+    try {
+        & node $merge 2>&1 | Out-Null
+    }
+    catch { }
+}
+
 function Invoke-AutostartDaemon {
-    $RouterJs = Join-Path $ProjectDir "router\server.js"
-    $PidFile  = Join-Path $ProjectDir ".claude\router.pid"
-    $LogFile  = Join-Path $ProjectDir ".claude\router.log"
-    $LogErr   = Join-Path $ProjectDir ".claude\router.err.log"
+    Invoke-HybridEnvMerge
+    $RouterJs = Join-Path $ProjectDir 'router\server.js'
+    $PidFile = Join-Path $ProjectDir '.claude\router.pid'
+    $LogFile = Join-Path $ProjectDir '.claude\router.log'
+    $LogErr = Join-Path $ProjectDir '.claude\router.err.log'
 
     $stateDir = Split-Path -Parent $PidFile
     if (-not (Test-Path $stateDir)) {
         New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
     }
 
-    if (-not (Get-Process -Name "ollama" -ErrorAction SilentlyContinue)) {
-        Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden
+    if (-not (Get-Process -Name 'ollama' -ErrorAction SilentlyContinue)) {
+        Start-Process ollama -ArgumentList 'serve' -WindowStyle Hidden
         Start-Sleep -Seconds 3
     }
 
@@ -105,7 +122,7 @@ function Invoke-AutostartDaemon {
         if ($portPid) {
             $routerRunning = $true
             $portProc = Get-Process -Id $portPid -ErrorAction SilentlyContinue
-            if ($portProc -and $portProc.ProcessName -eq "node") {
+            if ($portProc -and $portProc.ProcessName -eq 'node') {
                 $portPid | Out-File $PidFile -Force
             }
         }
@@ -130,22 +147,24 @@ function Ensure-Ollama {
     }
     Write-Step "`[Prereq] Ollama not found. Downloading installer..." Yellow
     $installerPath = "$env:TEMP\ollama-installer.exe"
-    $ollamaUrl     = "https://ollama.com/download/OllamaSetup.exe"
+    $ollamaUrl = 'https://ollama.com/download/OllamaSetup.exe'
     try {
         Invoke-WebRequest -Uri $ollamaUrl -OutFile $installerPath -UseBasicParsing
-        Write-Step "        Running installer (follow the prompts)..." Gray
+        Write-Step '        Running installer (follow the prompts)...' Gray
         Start-Process $installerPath -Wait
         Remove-Item $installerPath -ErrorAction SilentlyContinue
-        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
-            [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
+        [System.Environment]::GetEnvironmentVariable('PATH', 'User')
         if (Get-Command ollama -ErrorAction SilentlyContinue) {
             Write-Step "        Ollama installed: $(ollama --version)" Green
-        } else {
-            Write-Step "        Ollama installed but not in PATH yet - restart this terminal." Yellow
         }
-    } catch {
+        else {
+            Write-Step '        Ollama installed but not in PATH yet - restart this terminal.' Yellow
+        }
+    }
+    catch {
         Write-Host "        Download failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "        Install manually from https://ollama.com/download/windows" -ForegroundColor Red
+        Write-Host '        Install manually from https://ollama.com/download/windows' -ForegroundColor Red
         throw
     }
 }
@@ -157,40 +176,42 @@ function Ensure-Node {
     }
     Write-Step "`[Prereq] Node.js not found. Downloading LTS MSI..." Yellow
     try {
-        $nodeIndex   = Invoke-RestMethod "https://nodejs.org/dist/index.json" -UseBasicParsing
-        $lts         = $nodeIndex | Where-Object { $_.lts } | Select-Object -First 1
+        $nodeIndex = Invoke-RestMethod 'https://nodejs.org/dist/index.json' -UseBasicParsing
+        $lts = $nodeIndex | Where-Object { $_.lts } | Select-Object -First 1
         $nodeVersion = $lts.version
-        $nodeUrl     = "https://nodejs.org/dist/$nodeVersion/node-$nodeVersion-x64.msi"
-        $nodeMsi     = "$env:TEMP\node-installer.msi"
+        $nodeUrl = "https://nodejs.org/dist/$nodeVersion/node-$nodeVersion-x64.msi"
+        $nodeMsi = "$env:TEMP\node-installer.msi"
         Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeMsi -UseBasicParsing
         Write-Step "        Installing Node.js $nodeVersion..." Gray
         Start-Process msiexec -ArgumentList "/i `"$nodeMsi`" /qn" -Wait
         Remove-Item $nodeMsi -ErrorAction SilentlyContinue
-        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
-            [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
+        [System.Environment]::GetEnvironmentVariable('PATH', 'User')
         if (Get-Command node -ErrorAction SilentlyContinue) {
             Write-Step "        Node.js installed: $(node --version)" Green
-        } else {
-            Write-Step "        Node.js installed - restart terminal to use it." Yellow
         }
-    } catch {
+        else {
+            Write-Step '        Node.js installed - restart terminal to use it.' Yellow
+        }
+    }
+    catch {
         Write-Host "        Download failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "        Install manually from https://nodejs.org (LTS)" -ForegroundColor Red
+        Write-Host '        Install manually from https://nodejs.org (LTS)' -ForegroundColor Red
         throw
     }
 }
 
 function Ensure-GpuEnv {
     $pairs = @{
-        "OLLAMA_GPU_OVERHEAD"   = "0"
-        "CUDA_VISIBLE_DEVICES"  = "0"
-        "OLLAMA_NUM_GPU_LAYERS" = "99"
+        'OLLAMA_GPU_OVERHEAD'   = '0'
+        'CUDA_VISIBLE_DEVICES'  = '0'
+        'OLLAMA_NUM_GPU_LAYERS' = '99'
     }
     $changed = $false
     foreach ($kv in $pairs.GetEnumerator()) {
-        $cur = [System.Environment]::GetEnvironmentVariable($kv.Key, "User")
+        $cur = [System.Environment]::GetEnvironmentVariable($kv.Key, 'User')
         if ($cur -ne $kv.Value) {
-            [System.Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, "User")
+            [System.Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, 'User')
             Write-Step "`[Env] Set $($kv.Key)=$($kv.Value) (User)" Green
             $changed = $true
         }
@@ -208,7 +229,8 @@ function Ensure-Models {
     foreach ($m in $ModelsToPull) {
         if (Test-OllamaModelPresent $m) {
             Write-Step "`[Models] Already present: $m" Green
-        } else {
+        }
+        else {
             Write-Step "`[Models] Pulling $m ..." Yellow
             & ollama pull $m
             if ($LASTEXITCODE -ne 0) {
@@ -221,30 +243,87 @@ function Ensure-Models {
 function Ensure-AnthropicBaseUrl {
     # Match merge-claude-hybrid-env.js (127.0.0.1 avoids IPv6 localhost issues; same port as ROUTER_PORT).
     $port = $env:ROUTER_PORT
-    if (-not $port) { $port = "8082" }
+    if (-not $port) { $port = '8082' }
     $want = "http://127.0.0.1:$port"
-    $cur  = [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
+    $cur = [System.Environment]::GetEnvironmentVariable('ANTHROPIC_BASE_URL', 'User')
     if ($cur -eq $want) {
         Write-Step "`[Routing] ANTHROPIC_BASE_URL already $want" Green
-    } else {
-        [System.Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", $want, "User")
+    }
+    else {
+        [System.Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $want, 'User')
         Write-Step "`[Routing] ANTHROPIC_BASE_URL set to $want (User)" Green
     }
 }
 
 function Ensure-HybridRouterConfigFile {
-    $example = Join-Path $ProjectDir "router\hybrid.config.example.json"
-    $target  = Join-Path $ProjectDir "router\hybrid.config.json"
+    $example = Join-Path $ProjectDir 'router\hybrid.config.example.json'
+    $target = Join-Path $ProjectDir 'router\hybrid.config.json'
     if (-not (Test-Path $target) -and (Test-Path $example)) {
         Copy-Item -Path $example -Destination $target -Force
         Write-Step "`[Config] Created router\hybrid.config.json from example (edit model / routing)" Green
-    } elseif (Test-Path $target) {
+    }
+    elseif (Test-Path $target) {
         Write-Step "`[Config] router\hybrid.config.json already present" Green
     }
 }
 
+function Get-PreferredRouterTimeZone {
+    try {
+        $id = (Get-TimeZone).Id
+    }
+    catch {
+        return $null
+    }
+    $map = @{
+        'Eastern Standard Time'      = 'America/Toronto'
+        'Atlantic Standard Time'     = 'America/Halifax'
+        'Newfoundland Standard Time' = 'America/St_Johns'
+        'Central Standard Time'      = 'America/Winnipeg'
+        'Mountain Standard Time'     = 'America/Edmonton'
+        'Pacific Standard Time'      = 'America/Vancouver'
+    }
+    if ($map.ContainsKey($id)) { return $map[$id] }
+    return $null
+}
+
+function Ensure-RouterTimeZoneConfig {
+    $target = Join-Path $ProjectDir 'router\hybrid.config.json'
+    if (-not (Test-Path $target)) { return }
+    $timeZone = Get-PreferredRouterTimeZone
+    if (-not $timeZone) {
+        Write-Step "`[Config] Router time zone not mapped from Windows; runtime will use local system time" Gray
+        return
+    }
+    try {
+        $raw = Get-Content $target -Raw
+        $obj = if ($raw.Trim()) { $raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+    }
+    catch {
+        Write-Step "`[Config] Could not read router\hybrid.config.json to set time zone" Yellow
+        return
+    }
+    if ($null -eq $obj.display) {
+        Add-Member -InputObject $obj -MemberType NoteProperty -Name display -Value ([pscustomobject]@{})
+    }
+    $current = ''
+    try { $current = [string]$obj.display.time_zone } catch { $current = '' }
+    if ($current -and $current.Trim() -ne '') {
+        Write-Step "`[Config] Router time zone already set: $current" Green
+        return
+    }
+    try {
+        $obj.display | Add-Member -MemberType NoteProperty -Name time_zone -Value $timeZone -Force
+        $json = $obj | ConvertTo-Json -Depth 16
+        [System.IO.File]::WriteAllText($target, $json + [Environment]::NewLine)
+        Write-Step "`[Config] Router time zone set to $timeZone" Green
+    }
+    catch {
+        Write-Step "`[Config] Failed to write router time zone: $($_.Exception.Message)" Yellow
+    }
+}
+
 function Ensure-ClaudeSettingsHybridEnv {
-    $merge = Join-Path $ProjectDir "scripts\merge-claude-hybrid-env.js"
+    $merge = Join-Path $ProjectDir 'scripts\merge-claude-hybrid-env.js'
     if (-not (Test-Path $merge)) {
         Write-Step "`[Claude] merge script missing: $merge" Yellow
         return
@@ -257,13 +336,14 @@ function Ensure-ClaudeSettingsHybridEnv {
         if (-not $env:ROUTER_PORT -or $env:ROUTER_PORT -eq '') { $env:ROUTER_PORT = '8082' }
         $out = & node $merge 2>&1
         foreach ($line in $out) { Write-Step "        $line" Gray }
-    } catch {
+    }
+    catch {
         Write-Step "`[Claude] settings merge failed: $($_.Exception.Message)" Yellow
     }
 }
 
 function Ensure-AnthropicApiKey {
-    $existing = [System.Environment]::GetEnvironmentVariable("ANTHROPIC_API_KEY", "User")
+    $existing = [System.Environment]::GetEnvironmentVariable('ANTHROPIC_API_KEY', 'User')
     if ($existing) {
         Write-Step "`[Routing] ANTHROPIC_API_KEY already set" Green
         return
@@ -272,14 +352,15 @@ function Ensure-AnthropicApiKey {
         Write-Step "`[Routing] ANTHROPIC_API_KEY not set - skipped (-NonInteractive). Cloud fallback disabled until set." Yellow
         return
     }
-    Write-Host ""
+    Write-Host ''
     Write-Step "`[Routing] ANTHROPIC_API_KEY is not set (needed for cloud fallback)." Yellow
-    $key = Read-Host "        Paste Anthropic API key (sk-ant-...) or Enter to skip"
+    $key = Read-Host '        Paste Anthropic API key (sk-ant-...) or Enter to skip'
     if ($key) {
-        [System.Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", $key.Trim(), "User")
-        Write-Step "        API key saved (User)." Green
-    } else {
-        Write-Step "        Skipped - cloud fallback will not work until you set the key." Red
+        [System.Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY', $key.Trim(), 'User')
+        Write-Step '        API key saved (User).' Green
+    }
+    else {
+        Write-Step '        Skipped - cloud fallback will not work until you set the key.' Red
     }
 }
 
@@ -297,7 +378,7 @@ function Ensure-StartupVbs {
         return
     }
     $expected = (Get-ExpectedVbsContent $SetupPs).TrimEnd()
-    $write    = $true
+    $write = $true
     if (Test-Path $VbsPath) {
         try {
             $existing = (Get-Content -Path $VbsPath -Raw -ErrorAction Stop).TrimEnd()
@@ -305,7 +386,8 @@ function Ensure-StartupVbs {
                 Write-Step "`[Startup] Startup VBS already up to date: $VbsPath" Green
                 $write = $false
             }
-        } catch {
+        }
+        catch {
             $write = $true
         }
     }
@@ -315,7 +397,8 @@ function Ensure-StartupVbs {
             [System.IO.File]::WriteAllText($tmpPath, $expected + "`r`n", [System.Text.Encoding]::ASCII)
             Move-Item -Path $tmpPath -Destination $VbsPath -Force
             Write-Step "`[Startup] Wrote Startup launcher: $VbsPath" Green
-        } catch {
+        }
+        catch {
             Write-Host "  `[Startup] Failed: $($_.Exception.Message)" -ForegroundColor Red
         }
     }
@@ -332,10 +415,11 @@ function Ensure-RootShortcut {
         $sc.TargetPath = $PsExe
         $sc.Arguments = "-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File `"$SetupPs`" -Autostart"
         $sc.WorkingDirectory = $ProjectDir
-        $sc.Description = "Start Ollama (if needed) and Claude Hybrid router at Windows login"
+        $sc.Description = 'Start Ollama (if needed) and Claude Hybrid router at Windows login'
         $sc.Save()
         Write-Step "`[Shortcut] Root shortcut: $ShortcutLnk (copy to Startup if you prefer .lnk over VBS)" Green
-    } catch {
+    }
+    catch {
         Write-Host "  `[Shortcut] Failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 }
@@ -345,7 +429,7 @@ function Invoke-AutostartIfNeeded {
         Write-Step "`[Run] Router already listening on :8082 - skip daemon start" Green
         return
     }
-    if (-not (Test-Path (Join-Path $ProjectDir "router\server.js"))) {
+    if (-not (Test-Path (Join-Path $ProjectDir 'router\server.js'))) {
         Write-Step "`[Run] router\server.js not found" Yellow
         return
     }
@@ -362,29 +446,30 @@ if ($Autostart) {
 }
 
 if ($ShortcutOnly) {
-    Write-Host ""
-    Write-Host "  Claude Hybrid - startup shortcut only" -ForegroundColor Cyan
-    Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  Claude Hybrid - startup shortcut only' -ForegroundColor Cyan
+    Write-Host '  -----------------------------------------' -ForegroundColor DarkGray
     Ensure-RootShortcut
-    Write-Host ""
-    Write-Host "  Copy to Startup folder if desired:" -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  Copy to Startup folder if desired:' -ForegroundColor Cyan
     Write-Host "    $StartupFolder" -ForegroundColor White
-    Write-Host "  (Win+R -> shell:startup)" -ForegroundColor Gray
-    Write-Host ""
+    Write-Host '  (Win+R -> shell:startup)' -ForegroundColor Gray
+    Write-Host ''
     exit 0
 }
 
-Write-Host ""
-Write-Host "  Claude Hybrid - Setup" -ForegroundColor Cyan
-Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
-Write-Host ""
+Write-Host ''
+Write-Host '  Claude Hybrid - Setup' -ForegroundColor Cyan
+Write-Host '  -----------------------------------------' -ForegroundColor DarkGray
+Write-Host ''
 
 if (-not $RoutingOnly) {
     Ensure-Ollama
     Ensure-Node
     Ensure-GpuEnv
     Ensure-Models
-} else {
+}
+else {
     Write-Step "`[Mode] -RoutingOnly: skipping Ollama/Node/GPU env/model pulls" Gray
 }
 
@@ -392,15 +477,16 @@ Ensure-AnthropicBaseUrl
 Ensure-AnthropicApiKey
 Ensure-ClaudeSettingsHybridEnv
 Ensure-HybridRouterConfigFile
+Ensure-RouterTimeZoneConfig
 Ensure-StartupVbs
 Ensure-RootShortcut
 
 Invoke-AutostartIfNeeded
 
-Write-Host ""
-Write-Host "  Done." -ForegroundColor Cyan
+Write-Host ''
+Write-Host '  Done.' -ForegroundColor Cyan
 if (-not $RoutingOnly) {
-    Write-Host "  New terminals: use Claude Code / claude with hybrid routing." -ForegroundColor Gray
+    Write-Host '  New terminals: use Claude Code / claude with hybrid routing.' -ForegroundColor Gray
 }
 Write-Host "  Optional .lnk (copy to Startup): $ShortcutLnk" -ForegroundColor DarkGray
-Write-Host ""
+Write-Host ''

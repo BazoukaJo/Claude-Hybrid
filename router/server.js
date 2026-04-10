@@ -55,6 +55,11 @@ const {
   selectEnrichmentHead,
   mergeEnrichedModels,
 } = require("./lib/ollama-enrich-cap");
+const {
+  normalizeTimeZone,
+  localResolvedTimeZone,
+  formatClockTime,
+} = require("./lib/time-format");
 
 function normalizeCloudProtocol(input) {
   const v = String(input || "")
@@ -72,6 +77,9 @@ const CFG = {
     return Number.isFinite(p) && p > 0 ? p : 8082;
   })(),
   listenHost: "127.0.0.1",
+  display: {
+    time_zone: normalizeTimeZone(process.env.ROUTER_TIME_ZONE),
+  },
   local: {
     host: String(process.env.ROUTER_OLLAMA_HOST || "").trim() || "localhost",
     port: (() => {
@@ -155,15 +163,23 @@ function normalizeRoutingCfg() {
   CFG.routing.mode = normalizeRoutingMode(CFG.routing && CFG.routing.mode);
   sanitizeRoutingThresholds(CFG.routing);
 }
+function normalizeDisplayCfg() {
+  CFG.display =
+    CFG.display && typeof CFG.display === "object" ? CFG.display : {};
+  CFG.display.time_zone =
+    normalizeTimeZone(CFG.display.time_zone) || localResolvedTimeZone();
+}
 loadAndApply(CFG, routerDir);
 normalizeLocalCfg();
 normalizeRoutingCfg();
+normalizeDisplayCfg();
 watchConfig(routerDir, () => {
   loadAndApply(CFG, routerDir);
   normalizeLocalCfg();
   normalizeRoutingCfg();
+  normalizeDisplayCfg();
   console.log(
-    `[hybrid-config] reloaded listen=${CFG.listenHost} model=${CFG.local.model} mode=${CFG.routing.mode} fast=${CFG.local.fast_model || "(none)"} pool=${CFG.local.models.length || "all-tags"} smart=${CFG.local.smart_routing} thresholds=${CFG.routing.tokenThreshold}/${CFG.routing.fileReadThreshold}`,
+    `[hybrid-config] reloaded listen=${CFG.listenHost} model=${CFG.local.model} mode=${CFG.routing.mode} fast=${CFG.local.fast_model || "(none)"} pool=${CFG.local.models.length || "all-tags"} smart=${CFG.local.smart_routing} thresholds=${CFG.routing.tokenThreshold}/${CFG.routing.fileReadThreshold} tz=${CFG.display.time_zone || "local"}`,
   );
   startIdleUnloadTimer();
 });
@@ -583,7 +599,7 @@ function routeTo(dest, reason, fallback = false, extra = {}) {
   return dest;
 }
 function ts() {
-  return new Date().toISOString().slice(11, 19);
+  return formatClockTime(new Date(), CFG.display.time_zone);
 }
 function fmt(n) {
   if (!n) return "—";
@@ -1677,7 +1693,15 @@ a{color:inherit}
 .routing-mode-btn--choice{min-width:120px;flex:0 1 auto;flex-direction:column;align-items:flex-start;padding:10px 14px;text-align:left}
 .routing-mode-btn-main{display:block;font-size:12.5px;font-weight:700;line-height:1.2}
 .routing-mode-btn-sub{display:block;font-size:10px;font-weight:600;line-height:1.25;opacity:.86;margin-top:2px}
-.routing-mode-btn--choice.is-active{outline:2px solid rgba(255,255,255,.22);outline-offset:1px}
+.routing-mode-btn--choice.is-active{
+  outline:3px solid rgba(255,255,255,.42);
+  outline-offset:0;
+  transform:translateY(-1px) scale(1.02);
+  filter:saturate(1.14) brightness(1.08);
+  box-shadow:0 0 0 1px rgba(255,255,255,.16),0 12px 24px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.18);
+}
+.routing-mode-btn--choice.is-active .routing-mode-btn-main{color:#fff}
+.routing-mode-btn--choice.is-active .routing-mode-btn-sub{color:rgba(255,255,255,.94);opacity:1}
 .routing-mode-btn--choice.is-disabled,
 .routing-mode-btn--choice:disabled{
   background:rgba(148,163,184,.12) !important;
@@ -1708,16 +1732,23 @@ html.light .routing-mode--local{color:#15803d;border-color:rgba(22,163,74,.45);b
 html.light .routing-mode-btn--section.routing-mode--hybrid{box-shadow:0 2px 8px rgba(217,119,6,.12),inset 0 1px 0 rgba(255,255,255,.5)}
 html.light .routing-mode-btn--section.routing-mode--cloud{box-shadow:0 2px 8px rgba(124,58,237,.12),inset 0 1px 0 rgba(255,255,255,.45)}
 html.light .routing-mode-btn--section.routing-mode--local{box-shadow:0 2px 8px rgba(22,163,74,.1),inset 0 1px 0 rgba(255,255,255,.45)}
+html.light .routing-mode-btn--choice.is-active{
+  outline-color:rgba(15,23,42,.26);
+  box-shadow:0 0 0 1px rgba(15,23,42,.08),0 10px 18px rgba(15,23,42,.12),inset 0 1px 0 rgba(255,255,255,.55);
+}
+html.light .routing-mode-btn--choice.is-active .routing-mode-btn-main,
+html.light .routing-mode-btn--choice.is-active .routing-mode-btn-sub{color:#111827}
 /* meta panel */
-.hdr-meta{display:flex;flex-direction:column;align-items:flex-end;gap:.18rem;background:var(--meta-bg);border:1px solid var(--meta-border);border-radius:.4rem;padding:.2rem .5rem}
-.chips{display:flex;flex-wrap:wrap;gap:.2rem;justify-content:flex-end}
-.chip{display:inline-flex;align-items:center;padding:.1rem .4rem;border-radius:.3rem;font-size:.72rem;font-weight:500;background:var(--chip-bg);border:1px solid var(--chip-border);color:var(--text2);white-space:nowrap}
+.hdr-meta{display:flex;flex-direction:column;align-items:flex-end;gap:.2rem;background:var(--meta-bg);border:1px solid var(--meta-border);border-radius:.4rem;padding:.22rem .45rem;max-width:min(100%,34rem)}
+.chips{display:flex;flex-wrap:wrap;gap:.18rem;justify-content:flex-end}
+.chip{display:inline-flex;align-items:center;padding:.08rem .34rem;border-radius:.3rem;font-size:.69rem;font-weight:600;background:var(--chip-bg);border:1px solid var(--chip-border);color:var(--text2);white-space:nowrap}
 .chip.mono{font-family:ui-monospace,'Cascadia Code','Segoe UI Mono',monospace;font-size:.7rem;color:#93c5fd}
-.last-route-bar{margin-top:.28rem;font-size:.72rem;color:var(--text2);max-width:32rem;text-align:right;line-height:1.4}
+.meta-status-row{display:flex;align-items:center;justify-content:flex-end;gap:.5rem;min-width:0;width:100%}
+.last-route-bar{margin-top:0;font-size:.69rem;color:var(--text2);max-width:26rem;text-align:right;line-height:1.2;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
 .last-route-bar .lr-dest{font-weight:700;color:var(--green)}
 .last-route-bar.cloud .lr-dest{color:var(--blue)}
 .last-route-bar.fallback .lr-dest{color:var(--amber)}
-.refresh-row{display:flex;align-items:center;gap:.3rem;font-size:.7rem;color:var(--text3)}
+.refresh-row{display:inline-flex;align-items:center;gap:.26rem;font-size:.68rem;color:var(--text3);white-space:nowrap;flex:0 0 auto}
 .rdot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;flex-shrink:0}
 .rdot.err{background:#ef4444;animation:none}
 .rbtn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:4px;border:1px solid var(--btn-border);background:var(--btn-bg);color:var(--text2);cursor:pointer;font-size:9px;transition:all .15s}
@@ -1779,8 +1810,24 @@ h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;le
 .models-routing-bar-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--text3)}
 .models-routing-bar-hint{font-size:11px;color:var(--text2);line-height:1.4;max-width:40rem}
 @media(max-width:520px){
-  .models-routing-bar{flex-direction:column;align-items:stretch}
-  .routing-mode-btn-group{width:100%}
+  /* Column layout: avoid space-between + flex-grow on text (creates a huge gap above buttons). */
+  .models-routing-bar{
+    flex-direction:column;
+    align-items:stretch;
+    justify-content:flex-start;
+    gap:10px 12px;
+  }
+  .models-routing-bar-text{
+    flex:0 1 auto;
+    min-width:0;
+  }
+  .routing-mode-btn-group{
+    width:100%;
+    justify-content:flex-start;
+    flex-direction:column;
+    align-items:stretch;
+    gap:8px;
+  }
   .routing-mode-btn--section{width:100%}
 }
 .models-toolbar-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;margin-bottom:6px}
@@ -1825,6 +1872,11 @@ h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;le
 }
 .dash-callout strong{color:var(--text)}
 .dash-callout .inline-code,.params-sub .inline-code{font-family:ui-monospace,Consolas,monospace;font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
+.dash-callout--client{
+  background:color-mix(in srgb,var(--amber) 10%,var(--tile-bg));
+  border-color:color-mix(in srgb,var(--amber) 32%,var(--border));
+}
+html.light .dash-callout--client{background:rgba(251,191,36,.14);border-color:rgba(217,119,6,.28)}
 .dash-supporter-footer{
   margin:0;padding:12px 16px;border:1px solid var(--tile-border);background:color-mix(in srgb,var(--tile-bg) 92%,transparent);border-radius:var(--dash-card-radius);
   display:flex;justify-content:center;text-align:center;
@@ -2110,10 +2162,12 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
         <span class="chip mono">${String(cfg.local.host).replace(/[<>&]/g, "")}:${cfg.local.port}</span>
         <span class="chip mono">${String(cfg.listenHost).replace(/[<>&]/g, "")}:${cfg.port}</span>
       </div>
-      <div class="last-route-bar local" id="last-route-bar"><span id="last-route-text"></span></div>
-      <div class="refresh-row">
-        <span class="rdot" id="rdot"></span>
-        <span>Updated <span id="last-update">—</span> &middot; next poll <span id="next-poll">10</span>s</span>
+      <div class="meta-status-row">
+        <div class="last-route-bar local" id="last-route-bar" title="No recent route yet"><span id="last-route-text">Awaiting route</span></div>
+        <div class="refresh-row" id="refresh-row" title="Last updated: pending">
+          <span class="rdot" id="rdot"></span>
+          <span>next <span id="next-poll">10</span>s</span>
+        </div>
         <button class="rbtn" onclick="void runCoalescedDashboardRefresh(true)" title="Refresh now (reloads metrics and generation sliders from server)">&#8635;</button>
       </div>
     </div>
@@ -2326,15 +2380,20 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
 <div class="main">
 
   <div class="dash-callout" role="region" aria-label="Local-first routing">
-    <strong>Local-first, cloud when it matters.</strong>
-    Most work goes to your Ollama pool; smart routing picks a model per task. Very large prompts, heavy tool output this turn, or routing keywords still use Claude so quality stays high. Use <strong>Speed assist model</strong> below for a smaller tag on brief prompts (e.g. &ldquo;give a concise summary&rdquo;). Pool, smart routing, and speed assist save automatically when you change them.
+    <strong>Local-first, cloud when needed.</strong>
+    Smart routing uses your Ollama pool by default; very large prompts, heavy tool output this turn, or routing keywords go to Claude. <strong>Speed assist model</strong> prefers a smaller tag for brief prompts, and these settings save automatically.
+  </div>
+
+  <div class="dash-callout dash-callout--client" role="note" aria-label="Which apps use the router">
+    <strong>Claude Code CLI / IDE works. Claude desktop Windows/Mac app does not.</strong>
+    Run <span class="inline-code">claude</span> after <span class="inline-code">npm run merge-env</span>, or use Cursor / VS Code with Claude Code. The standalone Claude desktop app bypasses <span class="inline-code">ANTHROPIC_BASE_URL</span> and goes straight to Anthropic, so this router cannot see or route that traffic. Watch the footer for <strong>LOCAL</strong> / <strong>CLOUD</strong>.
   </div>
 
   <section class="dash-card dash-card--models-runtime" aria-labelledby="dash-models-h">
     <div class="models-routing-bar" role="group" aria-labelledby="routing-mode-heading">
       <div class="models-routing-bar-text">
         <span class="models-routing-bar-title" id="routing-mode-heading">API routing mode</span>
-        <span class="models-routing-bar-hint">Hybrid follows your thresholds and keywords; Claude only or Ollama only force every request that way. Click to cycle modes.</span>
+        <span class="models-routing-bar-hint">Hybrid uses your thresholds and keywords. Claude only and Ollama only force every request.</span>
       </div>
       <div class="routing-mode-btn-group" role="group" aria-label="Choose API routing mode">
         <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--hybrid" id="routing-mode-btn-hybrid" data-mode="hybrid"></button>
@@ -2753,8 +2812,8 @@ async function refreshHealth(){
     if(chip && d.ollama_version && (_healthPollGen%8===1 || !chip.textContent||chip.textContent==='Ollama')){
       chip.textContent='Ollama v'+d.ollama_version;
     }
-    const lu=document.getElementById('last-update');
-    if(lu) lu.textContent=new Date().toLocaleTimeString();
+    const refreshRow=document.getElementById('refresh-row');
+    if(refreshRow) refreshRow.title='Last updated: '+new Date().toLocaleTimeString();
   }catch(e){
     if(badge) badge.className='health-badge unhealthy';
     if(text) text.textContent=(e&&e.name==='AbortError')?'Router not responding (timeout)':'Health check failed';
@@ -4029,10 +4088,17 @@ async function refreshRouteStats(){
         const fb=lr.fallback;
         if(bar){bar.className='last-route-bar '+(fb?'fallback':(lr.dest==='cloud'?'cloud':'local'));}
         const dest=fb?('FALLBACK\u2192'+String(lr.dest).toUpperCase()):String(lr.dest).toUpperCase();
-        tx.innerHTML='<span class="lr-dest">'+dest+'</span> \u00b7 '+statEsc(lr.reason||'')+' \u00b7 <span style="opacity:.75">'+statEsc(lr.time||'')+'</span>';
+        const modeLabel=routingModeLabelFor(routingMode);
+        if(bar){
+          bar.title=[dest,modeLabel,lr.reason||'',lr.model||'',lr.time||''].filter(Boolean).join(' \u00b7 ');
+        }
+        tx.innerHTML='<span class="lr-dest">'+dest+'</span> \u00b7 '+statEsc(modeLabel)+(lr.time?(' \u00b7 <span style="opacity:.78">'+statEsc(lr.time)+'</span>'):'');
       } else {
-        if(bar)bar.className='last-route-bar local';
-        tx.textContent='';
+        if(bar){
+          bar.className='last-route-bar local';
+          bar.title='No recent route yet';
+        }
+        tx.textContent='Awaiting route';
       }
     }
   }catch{}
@@ -4347,6 +4413,7 @@ const server = http.createServer(async (req, res) => {
         config: {
           listenHost: CFG.listenHost,
           port: CFG.port,
+          time_zone: CFG.display.time_zone,
           local_model: CFG.local.model,
           fast_model: CFG.local.fast_model || undefined,
           local_models_pool: CFG.local.models,

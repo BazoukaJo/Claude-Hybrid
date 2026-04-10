@@ -24,14 +24,13 @@ set "STOP_EC=1"
 
 :wait_done
 
-REM Optional: also clear hybrid routing env only when explicitly requested:
-REM   stop_app.bat revert
-if /I "%~1"=="revert" goto :do_revert
-goto :end
+REM By default clear kit proxy so Claude Code uses Anthropic cloud when the router is down.
+REM Use: stop_app.bat keepenv  to stop only and leave ANTHROPIC_BASE_URL / settings unchanged.
+if /I "%~1"=="keepenv" goto :end
 
-:do_revert
 echo.
-echo Reverting hybrid User env + Claude settings.json...
+echo Clearing hybrid proxy ^(Claude settings.json, Cursor/VS Code terminal env, User ANTHROPIC_BASE_URL^)...
+echo Claude Code will use cloud until you start the router again ^(start_app.bat runs merge-env^).
 call "%~dp0scripts\revert-hybrid-core.bat"
 if errorlevel 1 set "STOP_EC=1"
 

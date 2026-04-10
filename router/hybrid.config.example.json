@@ -2,6 +2,9 @@
   "listen": {
     "host": "127.0.0.1"
   },
+  "display": {
+    "time_zone": "America/Toronto"
+  },
   "local": {
     "model": "VladimirGav/gemma4-26b-16GB-VRAM:latest",
     "fast_model": "gemma4:e4b",

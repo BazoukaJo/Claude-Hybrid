@@ -1,6 +1,6 @@
 @echo off
 REM Chained revert: Claude settings.json (kit URL) + Windows User env (ANTHROPIC_BASE_URL, optional GPU kit defaults).
-REM Invoked by: stop_app.bat revert
+REM Invoked by: stop_app.bat (default behavior). Use stop_app.bat keepenv to skip revert.
 setlocal
 cd /d "%~dp0.."
 node scripts\revert-claude-hybrid-env.js
