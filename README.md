@@ -18,8 +18,8 @@ After setup, use `claude` as usual; routing is automatic.
 | **Privacy**      | Optional cloud-only redaction can mask secrets, paths, URLs, emails, UUID-like IDs, and custom terms before a request is sent to Anthropic. Stronger identifier pseudonymization is also available.                                                                            |
 | **Resilience**   | If Ollama errors or Claude rate/quota limits are hit, the router can fall back according to the active routing mode. Cloud limit state is surfaced in the dashboard.                                                                                                           |
 | **Protocol**     | Anthropic-style requests are translated for Ollama’s OpenAI-compatible API, including messages, tools, and streaming. Cloud passthrough keeps the selected Claude model intact.                                                                                                |
-| **Dashboard**    | `http://localhost:8082` shows routing mode controls, default model, pool, smart routing, speed-assist model, Ollama runtime, installed library, generation sliders, **Generation settings**, **Model details**, and a fixed footer router log with backlog + live SSE updates. |
-| **Preview page** | `http://localhost:8082/header-ui` shows the compact header/system/log preview while full controls stay on `/`.                                                                                                                                                                 |
+| **Dashboard**    | **`http://127.0.0.1:8082/`** (or `http://localhost:8082/` — same listener; **`127.0.0.1`** is what `setup.ps1` / `npm run merge-env` set in env to avoid IPv6 localhost quirks) — routing mode, pool, smart routing, speed-assist, Ollama runtime, library, generation sliders, **Generation settings**, **Model details**, footer router log + SSE. |
+| **Preview page** | **`http://127.0.0.1:8082/header-ui`** — compact header / system / log; full controls on `/`.                                                                                                                                                                                      |
 | **Autostart**    | Optional: `setup.ps1` can install a Startup-folder launcher for Ollama + router.                                                                                                                                                                                               |
 
 **Hardware this kit targets:** 16 GB VRAM class GPUs and up; default tag is **`VladimirGav/gemma4-26b-16GB-VRAM:latest`**. Adjust `local.model` if you use a different Ollama name.
@@ -59,9 +59,60 @@ Routing-only (skip model pulls):
 .\setup.ps1 -RoutingOnly
 ```
 
-This sets **`ANTHROPIC_BASE_URL=http://localhost:8082`** (User env), prompts for **`ANTHROPIC_API_KEY`** if needed, and can register login autostart.
+`setup.ps1` sets **User** `ANTHROPIC_BASE_URL` to **`http://127.0.0.1:<PORT>`** (default port **8082**, or **`ROUTER_PORT`**), merges **`~/.claude/settings.json`** (`ANTHROPIC_BASE_URL`, **`ENABLE_TOOL_SEARCH`**, optional API key flow), updates **Cursor/VS Code** terminal env when the merge script runs, and can install autostart. It may prompt for **`ANTHROPIC_API_KEY`** when relevant.
 
-Restart the IDE after setup so it picks up merged `~/.claude/settings.json` env.
+After setup, run **`npm run merge-env`** anytime you change **`ROUTER_PORT`** or want to refresh IDE + Claude settings without re-running the full installer.
+
+Restart the IDE **fully** after setup or merge so the editor picks up **`settings.json`** changes.
+
+### Local deployment checklist
+
+| Step | Action |
+| ---- | ------ |
+| 1 | Install **Ollama**, **Node.js 18+**, **Claude Code** (see Prerequisites). |
+| 2 | Pull at least one model (`ollama pull …`). |
+| 3 | From repo root: **`.\setup.ps1`** (or **`-RoutingOnly`**). |
+| 4 | **`npm run merge-env`** — syncs `~/.claude/settings.json` + IDE **`terminal.integrated.env.*`** (**`ANTHROPIC_BASE_URL`** + **`ENABLE_TOOL_SEARCH`**). |
+| 5 | Start router: **`npm start`** or **`node .\router\server.js`** (router uses **no runtime npm dependencies**; **`npm install`** is only needed for **`npm test`** / Playwright). |
+| 6 | Verify: **`npm run diagnose`** (Windows) and open **`http://127.0.0.1:8082/`** (use your port if **`ROUTER_PORT`** is set). |
+| 7 | Run **`claude`** from a **new** integrated terminal or external shell so **`ANTHROPIC_BASE_URL`** is visible. |
+
+**Revert proxy env** (optional): `node scripts/revert-claude-hybrid-env.js` removes kit **`ANTHROPIC_BASE_URL`** from `~/.claude/settings.json` when it still matches this router. **`scripts/revert-hybrid-user-env.ps1`** clears User **`ANTHROPIC_BASE_URL`** (and kit-default GPU env vars if unchanged). **`stop_app.bat revert`** runs both via **`scripts/revert-hybrid-core.bat`**. **`ROUTER_REMOVE_CLAUDE_API_KEY=1 npm run merge-env`** drops **`ANTHROPIC_API_KEY`** from `settings.json` only.
+
+---
+
+## Docker, Podman, and Dev Containers
+
+Same router image works with **Docker Engine**, **Docker Desktop**, **Podman** (`podman compose` / `podman-compose`), and **VS Code Dev Containers**. The devcontainer prepends **`.devcontainer/docker-compose.devcontainer.yml`** so the repo is bind-mounted at **`/app`** (live `router/` + stable **`/app/.claude`** overlay) before the main compose file merges in **`router_claude_data`**.
+
+| File | Purpose |
+| ---- | ------- |
+| **`Dockerfile`** | Alpine + Node 22; copies **`router/`**; seeds **`hybrid.config.json`** from the example; **`ROUTER_HOST=0.0.0.0`**. |
+| **`docker-compose.yml`** | **Ollama** + **router**; Ollama on **`ollama:11434`**; published **`8082`**, **`11434`**. Optional **NVIDIA** stanza is commented in the file. |
+| **`docker-compose.host-ollama.yml`** | **Router only**; **`ROUTER_OLLAMA_HOST=host.docker.internal`** for Ollama on the host (**`extra_hosts: host-gateway`** on Linux). |
+
+**Typical flow (full stack):**
+
+```bash
+docker compose up -d --build
+# or: podman compose up -d --build
+docker exec -it <ollama-container-name> ollama pull gemma4:e4b   # example model
+```
+
+On the **host**, point Claude at the proxy (**`http://127.0.0.1:8082`**) — run **`npm run merge-env`** from this repo (or set **`ANTHROPIC_BASE_URL`** yourself).
+
+**npm scripts:** **`npm run docker:build`**, **`npm run docker:up`**, **`npm run docker:down`**.
+
+**Notes:**
+
+- **Ollama** has a **`healthcheck`** (`ollama list`); **router** uses **`depends_on: condition: service_healthy`** so it starts after the Ollama API is reachable (avoids losing the first requests on cold start).
+- **`ROUTER_HOST=0.0.0.0`** listens on all interfaces; if you publish **8082** beyond localhost, set **`ROUTER_ADMIN_TOKEN`** and send **`X-Router-Token`** / **`Authorization: Bearer`** on mutating **POST** routes (see **`CLAUDE.md`**).
+- **`GET /api/health`** includes **`ollama_host`**, **`ollama_port`**, **`router_listen`** so you can confirm wiring from scripts or CI.
+- Dashboard **Ollama service** start/stop is **Windows-only**; in containers you manage the **Ollama** service separately (compose or the host).
+- Override config: bind-mount your file, e.g. **`- ./my-hybrid.config.json:/app/router/hybrid.config.json`**. Or set **`ROUTER_HYBRID_CONFIG`** to an absolute path inside the container.
+- Generation JSON lives under **`/app/.claude`** in the image; compose uses a named volume **`router_claude_data`** (or **`router_claude_host`**) so slider saves persist.
+- **Dev Containers:** **`.devcontainer/docker-compose.devcontainer.yml`** sets **`NODE_ENV=development`** on **router** and **`mem_limit: 8g`** on **ollama** (tune or remove for larger GPUs); **`.devcontainer/devcontainer.json`** installs **git** via a Dev Container **feature** and runs **`npm install`** after create. To **not** auto-start the router (debugger / manual **`npm start`**), append **`docker-compose.router-manual.yml`** last to **`dockerComposeFile`** in **`devcontainer.json`** (see that file’s comment).
+- **Compose checks (needs Docker CLI):** **`npm run docker:config`**, **`npm run docker:config:devcontainer`**, **`npm run docker:config:devcontainer-manual`**.
 
 ---
 
@@ -72,10 +123,30 @@ Restart the IDE after setup so it picks up merged `~/.claude/settings.json` env.
 | Start router              | `npm start` (repo root), `node .\router\server.js`, or **`start_app.bat`** (Windows, minimized window)                                               |
 | Stop / restart (Windows)  | **`stop_app.bat`**, **`restart_app.bat`** (uses `ROUTER_PORT`, default 8082)                                                                         |
 | Login autostart (Windows) | Run **`install_startup_shortcut.bat`** once (creates _ClaudeLlama Router.lnk_ in your Startup folder; **Win+R** → `shell:startup` to view or remove) |
-| Open dashboard            | Browser: `http://localhost:8082` (use your `ROUTER_PORT` if overridden)                                                                              |
+| Open dashboard            | Browser: **`http://127.0.0.1:8082/`** (or `localhost`; use **`ROUTER_PORT`** if not 8082)                                                            |
 | Run tests                 | `npm test` · full + UI screenshots: `npm run test:all`                                                                                               |
+| Check IDE / Claude env    | **`npm run diagnose`** (Windows PowerShell: `ANTHROPIC_BASE_URL`, `ROUTER_PORT`, listener, `settings.json`, API key hint)                               |
+| Docker (full stack)       | **`npm run docker:up`** · stop: **`npm run docker:down`** · router-only compose: **`docker compose -f docker-compose.host-ollama.yml up -d --build`** |
 
 **Pool**, **smart routing**, **speed assist**, and **routing mode** write `hybrid.config.json` automatically when you change them. **Default model** saves on dropdown change. Main **generation sliders** save after you stop dragging (~½ s debounce).
+
+### Claude Code: “hit your limit” / quota messages
+
+Banners such as **“You’ve hit your limit for Claude messages”** come from **Anthropic / Claude Code plan limits**, not from this router. Pointing **`ANTHROPIC_BASE_URL`** at the kit **does not remove** subscription message caps; restarts do not reset them until the time shown in the app.
+
+**Optional — pay-as-you-go API key:** Claude Code can use a **Console API key** (with billing enabled) **instead of** subscription for eligible traffic when **`ANTHROPIC_API_KEY`** is set. See Anthropic’s [Environment variables](https://code.claude.com/docs/en/env-vars) (`ANTHROPIC_API_KEY` overrides subscription when present).
+
+To merge a key into **`~/.claude/settings.json`** together with the hybrid URL (key is not printed):
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-api03-..."   # from https://console.anthropic.com
+npm run merge-env
+Remove-Item Env:ANTHROPIC_API_KEY   # optional: clear this shell
+```
+
+Then fully restart the IDE / Claude Code; you may be prompted once to approve API-key auth. To drop the key from `settings.json` later (PowerShell): `$env:ROUTER_REMOVE_CLAUDE_API_KEY='1'; npm run merge-env; Remove-Item Env:ROUTER_REMOVE_CLAUDE_API_KEY`.
+
+Keeping **`routing.mode`** on **`local`** still sends completions through **Ollama** when the proxy is used; the key matters when Claude Code or the router talks to **Anthropic** (e.g. hybrid/cloud or client checks).
 
 ---
 
@@ -161,7 +232,7 @@ Additional behavior worth knowing:
 | `GET/POST /api/model-params`                | Global generation defaults in `.claude/model-params.json`                                          |
 | `GET /api/model-params-full`                | Built-in vs global vs per-model vs effective view                                                  |
 | `POST /api/model-params-per-model`          | Per-model overrides                                                                                |
-| `POST /api/router/model/start`              | Load the default Ollama model                                                                      |
+| `POST /api/router/model/start`              | Load default model into VRAM (API/automation; no dashboard **Start** button — Ollama loads on demand) |
 | `POST /api/router/model/stop`               | Unload the default Ollama model                                                                    |
 | `POST /api/router/model/restart`            | Restart the default Ollama model                                                                   |
 | `GET /api/router/model-details`             | Modal payload for **Model details**                                                                |
@@ -181,8 +252,10 @@ If **`ROUTER_ADMIN_TOKEN`** is set, mutating **POST**s need header **`X-Router-T
 | `router/lib/*.js`                   | Config, routing logic, model picker, metrics, admin auth                                                                                                                                               |
 | `router/public/`                    | `header-ui.html`, CSS under `/assets/`, `claude-code-icon.svg` (Claude mark path from [Bootstrap Icons](https://github.com/twbs/icons) `claude`, MIT; `/assets/claude-icon.svg` aliases the same file) |
 | `router/hybrid.config.example.json` | Template for `hybrid.config.json`                                                                                                                                                                      |
+| `Dockerfile`, `docker-compose*.yml`  | Container image + Compose (Ollama + router, or router + host Ollama)                                                                                                                                   |
+| `.devcontainer/`                    | Dev Container: compose prepend, optional **`docker-compose.router-manual.yml`** (no auto-router), **`devcontainer.json`**                                                                               |
 | `setup.ps1`                         | Setup entry (`-RoutingOnly`, `-ShortcutOnly`, `-Autostart`, …)                                                                                                                                         |
-| `scripts/`                          | `diagnose-claude-hybrid.ps1`, `merge-claude-hybrid-env.js`, …                                                                                                                                          |
+| `scripts/`                          | `merge-claude-hybrid-env.js`, `revert-claude-hybrid-env.js`, `revert-hybrid-user-env.ps1`, `revert-hybrid-core.bat` (used by **`stop_app.bat revert`**), `diagnose-claude-hybrid.ps1`, `notify-environment-windows.ps1` |
 | `tests/`                            | `npm test` (Node), `npm run test:e2e-ui` (Playwright screenshots; install Chromium once)                                                                                                               |
 | `powershell-profile-additions.ps1`  | Optional shell helpers                                                                                                                                                                                 |
 
@@ -202,13 +275,14 @@ npm start
 
 ```powershell
 [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
-# expect: http://localhost:8082 (or your ROUTER_PORT)
+Get-Content (Join-Path $env:USERPROFILE ".claude\settings.json") -Raw # expect env.ANTHROPIC_BASE_URL → http://127.0.0.1:<PORT>
 ```
 
 **Diagnostics**
 
 ```powershell
-.\scripts\diagnose-claude-hybrid.ps1
+npm run diagnose
+# or: .\scripts\diagnose-claude-hybrid.ps1
 ```
 
 **Privacy sanity check**
@@ -234,5 +308,8 @@ npm run test:e2e-ui   # optional; requires: npm i && npx playwright install chro
 ## Development notes
 
 - After edits to **`router/server.js`** or **`router/lib/*`** loaded at startup, **restart** the router (`npm start`).
+- **`npm install`** installs **devDependencies** (e.g. Playwright for **`npm run test:e2e-ui`**). The **router process itself** does not `require()` npm packages.
 - **`npm test`** runs integration tests on a temporary port (no conflict with a router on 8082).
 - The fixed footer router log hydrates from `/api/logs` and then follows `/events`, so reconnects should keep the log populated instead of showing an empty panel.
+
+Environment variables for the router are summarized in **`CLAUDE.md`** (`ROUTER_HOST`, `ROUTER_PORT`, `ROUTER_ADMIN_TOKEN`, `ROUTER_SKIP_AUTO_DEFAULT_MODELS`, etc.).

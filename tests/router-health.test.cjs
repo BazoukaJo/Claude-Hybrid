@@ -71,5 +71,8 @@ test('GET /api/health returns JSON within budget (no admin token)', async (t) =>
   const j = JSON.parse(r.body);
   assert.strictEqual(typeof j.status, 'string');
   assert.ok(['healthy', 'degraded'].includes(j.status));
+  assert.strictEqual(j.ollama_host, 'localhost');
+  assert.strictEqual(j.ollama_port, 11434);
+  assert.ok(typeof j.router_listen === 'string' && j.router_listen.includes(':'));
   assert.ok(elapsed < HEALTH_MAX_MS, `single /api/health round-trip took ${elapsed}ms (max ${HEALTH_MAX_MS}ms)`);
 });

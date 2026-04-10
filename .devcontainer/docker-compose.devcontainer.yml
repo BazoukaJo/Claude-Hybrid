@@ -1,0 +1,12 @@
+# Prepended before ../docker-compose.yml so merged router volumes become:
+#   ..:/app:cached  then  router_claude_data:/app/.claude
+# (bind repo first, then named volume overlays .claude — correct nesting).
+services:
+  ollama:
+    # Soft cap for laptop dev (raise or remove on a bigger machine).
+    mem_limit: 8g
+  router:
+    volumes:
+      - ..:/app:cached
+    environment:
+      NODE_ENV: development

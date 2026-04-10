@@ -6,11 +6,20 @@ Write-Host "  Claude Hybrid - client routing diagnosis" -ForegroundColor Cyan
 Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 
+$routerPort = [System.Environment]::GetEnvironmentVariable("ROUTER_PORT", "User")
+if (-not $routerPort) { $routerPort = $env:ROUTER_PORT }
+if (-not $routerPort) { $routerPort = "8082" }
+$routerPort = "$routerPort".Trim()
+$portRx = [regex]::Escape($routerPort)
+
 $userBase = [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
 $sessBase = $env:ANTHROPIC_BASE_URL
+Write-Host "  ROUTER_PORT (expected):              " -NoNewline
+Write-Host $routerPort -ForegroundColor Gray
+
 Write-Host "  ANTHROPIC_BASE_URL (User registry):  " -NoNewline
 if ($userBase) {
-    $okUser = ($userBase -match '^https?://(127\.0\.0\.1|localhost):8082/?$')
+    $okUser = ($userBase -match "^https?://(127\.0\.0\.1|localhost):${portRx}/?$")
     Write-Host $userBase -ForegroundColor $(if ($okUser) { "Green" } else { "Yellow" })
 }
 else { Write-Host "(not set)" -ForegroundColor Red }
@@ -26,10 +35,16 @@ if (Test-Path $settingsPath) {
         $eb = $j.env.ANTHROPIC_BASE_URL
         Write-Host $settingsPath -ForegroundColor Gray
         Write-Host "    env.ANTHROPIC_BASE_URL = " -NoNewline
-        $okEb = ($eb -match '^https?://(127\.0\.0\.1|localhost):8082/?$')
+        $okEb = ($eb -match "^https?://(127\.0\.0\.1|localhost):${portRx}/?$")
         if ($okEb) { Write-Host $eb -ForegroundColor Green }
         elseif ($eb) { Write-Host $eb -ForegroundColor Yellow }
-        else { Write-Host "(missing - run setup.ps1 or: node scripts\merge-claude-hybrid-env.js)" -ForegroundColor Red }
+        else { Write-Host "(missing - npm run merge-env or .\setup.ps1)" -ForegroundColor Red }
+        Write-Host "    env.ANTHROPIC_API_KEY = " -NoNewline
+        if ($j.env.ANTHROPIC_API_KEY -and "$($j.env.ANTHROPIC_API_KEY)".Trim().Length -gt 0) {
+            Write-Host "(set - API / pay-as-you-go; see README quota section)" -ForegroundColor Green
+        } else {
+            Write-Host "(not set - subscription auth only for Claude Code)" -ForegroundColor DarkGray
+        }
     } catch {
         Write-Host "exists but JSON parse failed - fix file" -ForegroundColor Red
     }
@@ -41,18 +56,22 @@ Write-Host ""
 $listen = $false
 try {
     if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
-        $c = Get-NetTCPConnection -LocalPort 8082 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        $listen = [bool]$c
+        $pNum = 0
+        if ([int]::TryParse($routerPort, [ref]$pNum)) {
+            $c = Get-NetTCPConnection -LocalPort $pNum -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+            $listen = [bool]$c
+        }
     }
 } catch {}
 if (-not $listen) {
     try {
-        $line = netstat -ano | Select-String "^\s*TCP\s+\S+:8082\s+\S+\s+LISTENING\s+\d+\s*$" | Select-Object -First 1
+        $rx = "^\s*TCP\s+\S+:${portRx}\s+\S+\s+LISTENING\s+\d+\s*$"
+        $line = netstat -ano | Select-String $rx | Select-Object -First 1
         $listen = [bool]$line
     } catch {}
 }
-Write-Host "  Router :8082 listening:              " -NoNewline
-if ($listen) { Write-Host "yes" -ForegroundColor Green } else { Write-Host "no - start router (.\setup.ps1 -Autostart or node router\server.js)" -ForegroundColor Red }
+Write-Host "  Router listening on port ${routerPort}:      " -NoNewline
+if ($listen) { Write-Host "yes" -ForegroundColor Green } else { Write-Host "no - start router (npm start or node router\server.js)" -ForegroundColor Red }
 
 Write-Host ""
 $rh = [System.Environment]::GetEnvironmentVariable("ROUTER_HOST", "User")
@@ -76,6 +95,7 @@ Write-Host "      sign out/in or add env via settings.json (merge script above).
 Write-Host "    - The consumer Claude desktop app (claude.ai) does not use this proxy; use" -ForegroundColor DarkGray
 Write-Host "      Claude Code CLI, Cursor, or other API-compatible clients." -ForegroundColor DarkGray
 Write-Host "    - Apply routing to Claude + IDE terminals:  npm run merge-env   (or: setup.ps1)" -ForegroundColor DarkGray
+Write-Host "    - Quota / pay-as-you-go: README section 'Claude Code: hit your limit'" -ForegroundColor DarkGray
 Write-Host "    - Quota text (e.g. hit your limit for Claude messages) can be from (A) Claude" -ForegroundColor DarkGray
 Write-Host "      Code subscription/auth paths that never hit this router, or (B) Anthropic API" -ForegroundColor DarkGray
 Write-Host "      after the router forwarded a cloud request. Check: when the message appears," -ForegroundColor DarkGray

@@ -1,0 +1,47 @@
+# Full stack: Ollama + router (sharing-friendly default).
+# Usage: docker compose up -d --build
+# Then set ANTHROPIC_BASE_URL=http://127.0.0.1:8082 on the host (npm run merge-env).
+#
+# Podman: podman compose up -d --build  (or podman-compose)
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 15s
+      retries: 12
+      start_period: 30s
+    # GPU (NVIDIA + nvidia-container-toolkit): uncomment below
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  router:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      ROUTER_HOST: "0.0.0.0"
+      ROUTER_OLLAMA_HOST: ollama
+      ROUTER_OLLAMA_PORT: "11434"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - router_claude_data:/app/.claude
+
+volumes:
+  ollama_data:
+  router_claude_data:

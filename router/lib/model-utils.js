@@ -44,7 +44,7 @@ function modelNamesMatch(configuredModel, psRowName) {
 }
 
 /**
- * Normalize Ollama /api/ps JSON: `{ models: [...] }` or (legacy) a top-level array.
+ * Normalize Ollama /api/ps JSON: `{ models: [...] }` or a top-level array (older responses).
  */
 function listPsModels(ps) {
   if (!ps || typeof ps !== 'object') return [];

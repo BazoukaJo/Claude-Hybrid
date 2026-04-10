@@ -1,0 +1,17 @@
+node_modules
+.git
+.github
+**/.DS_Store
+Thumbs.db
+.claude
+router/hybrid.config.json
+coverage
+.nyc_output
+tests
+playwright-report
+test-results
+blob-report
+.playwright-mcp
+*.log
+npm-debug.log*
+assets/ux-review-screenshots

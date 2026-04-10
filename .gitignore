@@ -35,6 +35,9 @@ playwright-report/
 test-results/
 blob-report/
 
+# Tooling captures
+.playwright-mcp/
+
 # Editors / misc
 .idea/
 *.swp

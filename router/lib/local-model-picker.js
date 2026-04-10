@@ -156,10 +156,6 @@ function nameSuggestsVision(name) {
   return /llava|vision|vl-|qwen.*vl|bakllava|moondream|minicpm-v|internvl|pixtral/i.test(String(name || ''));
 }
 
-function nameSuggestsTools(name) {
-  return /tool|function|hermes|firefunction|nexusraven/i.test(String(name || ''));
-}
-
 /** Coding-oriented tags (tool + code quality) — boosts when tools are in play or tool results are heavy. */
 function nameSuggestsCoder(name) {
   return /coder|code-|starcoder|codestral|codellama|deepseek.*coder|qwen.*coder|granite-code|command-r|devstral|mistral-nemo|phi4|gpt-oss|solar-pro|wizardcoder|phind|duckdb-nsm|gemma|llama3|llama-3|qwen2|qwen3|mistral|mixtral/i.test(
@@ -197,7 +193,7 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
   const toolsInSchema =
     task.toolsInSchema !== undefined && task.toolsInSchema !== null
       ? !!task.toolsInSchema
-      : !!task.needsTools;
+      : !!task.needsTools; /* backward compat: external callers may set needsTools */
   const toolResultsThisTurn =
     task.toolResultsThisTurn != null && Number.isFinite(task.toolResultsThisTurn)
       ? Math.max(0, Math.trunc(task.toolResultsThisTurn))

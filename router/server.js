@@ -1,6 +1,6 @@
 "use strict";
 // ─────────────────────────────────────────────────────────────────────────────
-// ClaudeLlama Router  —  http://localhost:8082
+// ClaudeLlama Router — default http://127.0.0.1:8082 (ROUTER_PORT overrides)
 // ─────────────────────────────────────────────────────────────────────────────
 const http = require("http");
 const https = require("https");
@@ -2037,7 +2037,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
     <div class="hdr-meta">
       <div class="chips">
         <span class="chip" id="chip-ollama">Ollama</span>
-        <span class="chip mono">localhost:11434</span>
+        <span class="chip mono">${String(cfg.local.host).replace(/[<>&]/g, "")}:${cfg.local.port}</span>
         <span class="chip mono">${String(cfg.listenHost).replace(/[<>&]/g, "")}:${cfg.port}</span>
       </div>
       <div class="last-route-bar local" id="last-route-bar"><span id="last-route-text"></span></div>
@@ -4419,6 +4419,9 @@ const server = http.createServer(async (req, res) => {
             status: healthy ? "healthy" : "degraded",
             ollama_version: ver,
             uptime_seconds: healthy ? Math.floor(process.uptime()) : 0,
+            ollama_host: CFG.local.host,
+            ollama_port: CFG.local.port,
+            router_listen: `${CFG.listenHost}:${CFG.port}`,
           };
         })(),
         new Promise((_, reject) => {
@@ -4433,6 +4436,9 @@ const server = http.createServer(async (req, res) => {
         status: "degraded",
         ollama_version: ollamaVersionCache,
         uptime_seconds: Math.floor(process.uptime()),
+        ollama_host: CFG.local.host,
+        ollama_port: CFG.local.port,
+        router_listen: `${CFG.listenHost}:${CFG.port}`,
       };
     }
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -4837,9 +4843,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Ollama service control (Windows)
+  // Ollama service control (Windows host only; no-op in Docker/Linux)
   if (req.method === "POST" && reqPath.startsWith("/api/service/")) {
     if (!requireAdmin(req, res)) return;
+    if (process.platform !== "win32") {
+      res.writeHead(501, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "unsupported_platform",
+          message:
+            "Ollama start/stop/restart via the dashboard is only supported on Windows. In Docker or Linux, manage Ollama with your container runtime or supervisor.",
+        }),
+      );
+      return;
+    }
     const action = reqPath.split("/").pop();
     const cmds = {
       start:

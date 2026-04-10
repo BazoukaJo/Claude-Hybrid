@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 function Remove-UserEnv([string]$name) {
     $cur = [System.Environment]::GetEnvironmentVariable($name, "User")
     if ($null -eq $cur -or $cur -eq "") {
-        Write-Host "  (skip) $name — not set at User level"
+        Write-Host "  (skip) $name - not set at User level"
         return
     }
     [System.Environment]::SetEnvironmentVariable($name, $null, "User")

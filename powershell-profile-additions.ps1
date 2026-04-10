@@ -1,5 +1,5 @@
 # Optional PowerShell profile additions for Claude Hybrid
-# These are NOT required — hybrid routing works automatically via ANTHROPIC_BASE_URL.
+# These are NOT required - hybrid routing works automatically via ANTHROPIC_BASE_URL.
 # Add these only if you want convenient manual overrides.
 #
 # Open profile: notepad $PROFILE
@@ -18,12 +18,15 @@ function claude-cloud {
 function claude-mode {
     $url = [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
     $session = $env:ANTHROPIC_BASE_URL
-    if ($session -eq "http://localhost:8082" -or $url -eq "http://localhost:8082") {
-        Write-Host "Hybrid routing active (local + cloud auto-routing via proxy)" -ForegroundColor Green
-    } elseif ($session -eq "http://localhost:11434") {
-        Write-Host "Local only (Gemma 4 via Ollama)" -ForegroundColor Yellow
+    $hybrid = ($session -match '^https?://(127\.0\.0\.1|localhost):8082/?$') -or ($url -match '^https?://(127\.0\.0\.1|localhost):8082/?$')
+    if ($hybrid) {
+        Write-Host "Hybrid routing active (ANTHROPIC_BASE_URL points at this kit's router)" -ForegroundColor Green
+    } elseif ($session -match '^https?://(127\.0\.0\.1|localhost):\d+/?$' -or $url -match '^https?://(127\.0\.0\.1|localhost):\d+/?$') {
+        Write-Host "Proxy URL set on localhost (check ROUTER_PORT if not 8082)" -ForegroundColor Green
+    } elseif (-not $session -and -not $url) {
+        Write-Host "No ANTHROPIC_BASE_URL in session or User env (Claude Code may use ~/.claude/settings.json)" -ForegroundColor DarkGray
     } else {
-        Write-Host "Cloud only (direct Anthropic API)" -ForegroundColor Cyan
+        Write-Host "Cloud or custom API path (session or User env differs from localhost router)" -ForegroundColor Cyan
     }
 }
 

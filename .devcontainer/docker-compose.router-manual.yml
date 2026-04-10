@@ -1,0 +1,6 @@
+# Optional last file in devcontainer.json → "dockerComposeFile" array:
+# keeps Ollama + deps but does not auto-start the router (attach debugger / run by hand).
+# In a workspace terminal: npm start   or   node router/server.js
+services:
+  router:
+    command: ["sleep", "infinity"]

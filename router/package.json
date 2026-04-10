@@ -1,12 +1,10 @@
 {
   "name": "claude-hybrid-router",
-  "version": "1.0.0",
   "private": true,
-  "description": "HTTP entry for Claude Hybrid (use `npm start` from repo root when possible)",
+  "description": "HTTP entry; run npm start from repository root (npm test runs there too).",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test ../tests/model-utils.test.cjs ../tests/routing-logic.test.cjs ../tests/local-model-picker.test.cjs ../tests/auto-default-models.test.cjs ../tests/router-http.test.cjs ../tests/router-admin-http.test.cjs ../tests/dashboard-recent-smoke.cjs"
+    "start": "node server.js"
   },
   "engines": { "node": ">=18" }
 }

@@ -1,0 +1,24 @@
+name: Docker smoke
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose (full stack)
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Validate compose (devcontainer merge)
+        run: docker compose -f .devcontainer/docker-compose.devcontainer.yml -f docker-compose.yml config --quiet
+
+      - name: Validate compose (devcontainer + manual router)
+        run: docker compose -f .devcontainer/docker-compose.devcontainer.yml -f docker-compose.yml -f .devcontainer/docker-compose.router-manual.yml config --quiet
+
+      - name: Build router image
+        run: docker compose -f docker-compose.yml build router

@@ -474,3 +474,34 @@ test("router HTTP: local-model switch stays non-error while new model is still l
   assert.strictEqual(loaded.configured_loaded, true);
   assert.ok(!("error" in loaded), loadedResp.body);
 });
+
+if (process.platform !== "win32") {
+  test("POST /api/service/start returns 501 on non-Windows (Docker/Linux safe)", async (t) => {
+    const routerDir = path.join(__dirname, "..", "router");
+    const child = spawnRouter(routerDir, {
+      ...process.env,
+      ROUTER_PORT: String(TEST_PORT + 10),
+    });
+    t.after(() => {
+      try {
+        child.kill("SIGTERM");
+      } catch (_) {}
+    });
+    await waitFor(async () => {
+      const r = await httpRequest(
+        "GET",
+        `http://127.0.0.1:${TEST_PORT + 10}/api/health`,
+      );
+      return r.status === 200;
+    });
+    const r = await httpRequest(
+      "POST",
+      `http://127.0.0.1:${TEST_PORT + 10}/api/service/start`,
+      "{}",
+    );
+    assert.strictEqual(r.status, 501);
+    const j = JSON.parse(r.body);
+    assert.strictEqual(j.ok, false);
+    assert.strictEqual(j.error, "unsupported_platform");
+  });
+}

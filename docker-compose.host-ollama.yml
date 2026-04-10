@@ -1,0 +1,22 @@
+# Router only — use Ollama already running on the host (port 11434).
+# Usage: docker compose -f docker-compose.host-ollama.yml up -d --build
+#
+# Linux: host-gateway reaches the host. macOS/Windows Docker Desktop: host.docker.internal works.
+
+services:
+  router:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      ROUTER_HOST: "0.0.0.0"
+      ROUTER_OLLAMA_HOST: host.docker.internal
+      ROUTER_OLLAMA_PORT: "11434"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - router_claude_host:/app/.claude
+
+volumes:
+  router_claude_host:

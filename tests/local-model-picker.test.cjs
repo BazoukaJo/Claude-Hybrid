@@ -157,7 +157,7 @@ test('pickBestLocalModel: tools in schema but light prompt prefers smaller capab
   assert.strictEqual(model, 'small:latest');
 });
 
-test('pickBestLocalModel: legacy task.needsTools maps to toolsInSchema', () => {
+test('pickBestLocalModel: task.needsTools alias maps to toolsInSchema', () => {
   const profiles = [
     { name: 'a:latest', context_max: 8192, has_vision: false, has_tools: true, has_reasoning: false, param_billions: 2, family: 'a' },
     { name: 'b:latest', context_max: 8192, has_vision: false, has_tools: false, has_reasoning: false, param_billions: 2, family: 'b' },

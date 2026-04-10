@@ -4,9 +4,16 @@
   "scripts": {
     "start": "node router/server.js",
     "merge-env": "node scripts/merge-claude-hybrid-env.js",
+    "diagnose": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/diagnose-claude-hybrid.ps1",
     "test": "node --test tests/model-utils.test.cjs tests/routing-logic.test.cjs tests/routing-threshold-bounds.test.cjs tests/daily-routing-scenarios.test.cjs tests/local-model-picker.test.cjs tests/auto-default-models.test.cjs tests/ollama-enrich-cap.test.cjs tests/ollama-model-presets.test.cjs tests/cloud-fallback.test.cjs tests/privacy-redactor.test.cjs tests/privacy-cloud-http.test.cjs tests/router-health.test.cjs tests/router-http.test.cjs tests/router-admin-http.test.cjs tests/dashboard-recent-smoke.cjs tests/dashboard-inline-script-syntax.cjs",
     "test:e2e-ui": "node tests/e2e-ui-screenshots.cjs",
-    "test:all": "npm test && npm run test:e2e-ui"
+    "test:all": "npm test && npm run test:e2e-ui",
+    "docker:build": "docker build -t claude-hybrid-router .",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:config": "docker compose -f docker-compose.yml config --quiet",
+    "docker:config:devcontainer": "docker compose -f .devcontainer/docker-compose.devcontainer.yml -f docker-compose.yml config --quiet",
+    "docker:config:devcontainer-manual": "docker compose -f .devcontainer/docker-compose.devcontainer.yml -f docker-compose.yml -f .devcontainer/docker-compose.router-manual.yml config --quiet"
   },
   "devDependencies": {
     "playwright": "^1.50.0"

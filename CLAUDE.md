@@ -11,8 +11,9 @@ A kit that routes Claude Code (and other Anthropic-API-compatible clients) betwe
 ```text
 Claude Code / Cursor / IDE
     |
-    | ANTHROPIC_BASE_URL=http://localhost:8082  (or ROUTER_PORT)
-    |   Windows User env + ~/.claude/settings.json — setup.ps1 merges both
+    | ANTHROPIC_BASE_URL=http://127.0.0.1:8082  (default; or ROUTER_PORT)
+    |   User env + ~/.claude/settings.json + Cursor/VS Code terminal.integrated.env.*
+    |   setup.ps1 and/or npm run merge-env (scripts/merge-claude-hybrid-env.js)
     v
 router/server.js  (Node proxy; no npm deps for the router itself)
     |  router/lib/*.js — config, routing analysis, smart model picker, metrics, admin
@@ -48,8 +49,13 @@ Root **`.gitignore`** may exclude `router/hybrid.config.json` and some `.claude/
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `ROUTER_HOST`                     | Bind address; default **`127.0.0.1`**. Use **`0.0.0.0`** only with care (LAN + consider `ROUTER_ADMIN_TOKEN`). |
 | `ROUTER_PORT` / `PORT`            | Listen port; default **8082**.                                                                                 |
+| `ROUTER_OLLAMA_HOST`              | Ollama HTTP host for the router (default **`localhost`**). In Docker Compose use the **Ollama** service name; with host Ollama use **`host.docker.internal`**. |
+| `ROUTER_OLLAMA_PORT`              | Ollama HTTP port (default **11434**).                                                                         |
+| `ROUTER_HYBRID_CONFIG`            | Absolute path to an alternate **`hybrid.config.json`** (see **`router/lib/hybrid-config.js`**).                 |
 | `ROUTER_ADMIN_TOKEN`              | If set, mutating **POST** routes require **`X-Router-Token`** or **`Authorization: Bearer`**.                  |
 | `ROUTER_SKIP_AUTO_DEFAULT_MODELS` | Skip startup auto-picking for `local.model` / `local.fast_model` when they are empty in config.                |
+
+**Claude Code client env** (via `~/.claude/settings.json` and IDE terminal blocks) is updated by **`npm run merge-env`**: **`ANTHROPIC_BASE_URL`**, **`ENABLE_TOOL_SEARCH`**, and optionally **`ANTHROPIC_API_KEY`** if that variable is set in the shell when merge runs. Remove stored API key: **`ROUTER_REMOVE_CLAUDE_API_KEY=1`** with merge (see **`README.md`** quota section).
 
 ## Routing rules (high level)
 
@@ -92,7 +98,11 @@ ollama pull gemma4:e4b
 # or: .\setup.ps1 -RoutingOnly
 ```
 
-Restart the IDE after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, Cursor/VS Code terminal env, and User `ANTHROPIC_BASE_URL`), then **fully quit** the IDE and reopen. The **Claude consumer desktop app** is not the same integration path as Claude Code; prefer terminal **`claude`** or IDE extensions.
+Restart the IDE after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, Cursor/VS Code **`terminal.integrated.env.*`** with **`ANTHROPIC_BASE_URL`** + **`ENABLE_TOOL_SEARCH`**, and aligns User **`ANTHROPIC_BASE_URL`** with **`setup.ps1`**), then **fully quit** the IDE and reopen. On Windows, merge may run **`scripts/notify-environment-windows.ps1`** so User env changes propagate without a full reboot (best-effort). The **Claude consumer desktop app** is not the same integration path as Claude Code; prefer terminal **`claude`** or IDE extensions.
+
+**Local deploy sanity:** **`npm start`** → dashboard **`http://127.0.0.1:8082/`**; **`npm run diagnose`** (Windows) checks port, listener, and settings. **`npm install`** is only required for **`npm test`** / Playwright, not for running the router.
+
+**Containers:** **`Dockerfile`**, **`docker-compose.yml`** (Ollama **`healthcheck`**, router **`depends_on` → `service_healthy`**), **`docker-compose.host-ollama.yml`**, **`.devcontainer/docker-compose.devcontainer.yml`** (prepended: **`/app`** bind-mount, **`NODE_ENV=development`**, optional **ollama `mem_limit`**), optional **`.devcontainer/docker-compose.router-manual.yml`** (append last in **`dockerComposeFile`** to keep the container up without auto-starting **`node router/server.js`**), **`npm run docker:up` / `docker:down`**, **`npm run docker:config`** / **`docker:config:devcontainer*`** — see **`README.md`**. **`GET /api/health`** exposes **`ollama_host`**, **`ollama_port`**, **`router_listen`**. If **`ROUTER_HOST`** exposes the dashboard on a LAN, set **`ROUTER_ADMIN_TOKEN`** for mutating **POST** routes.
 
 ## Manual controls
 
@@ -101,11 +111,11 @@ Restart the Node router after changing **`router/server.js`** or **`router/lib/*
 ```powershell
 npm start
 # or: node router\server.js
-# Windows: start_app.bat / stop_app.bat / restart_app.bat; install_startup_shortcut.bat → Startup folder .lnk
+# Windows: start_app.bat / stop_app.bat / restart_app.bat; stop_app.bat revert (settings + User env); install_startup_shortcut.bat → Startup folder .lnk
 $env:ANTHROPIC_BASE_URL = ""   # force cloud for this session
 claude
 [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
-.\scripts\diagnose-claude-hybrid.ps1
+npm run diagnose
 npm run merge-env
 ```
 

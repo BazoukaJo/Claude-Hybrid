@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "Claude Hybrid + Ollama",
+  "dockerComposeFile": ["docker-compose.devcontainer.yml", "../docker-compose.yml"],
+  "service": "router",
+  "runServices": ["ollama", "router"],
+  "workspaceFolder": "/app",
+  "shutdownAction": "stopCompose",
+  "forwardPorts": [8082, 11434],
+  "portsAttributes": {
+    "8082": { "label": "Router (dashboard & Anthropic-compatible API)" },
+    "11434": { "label": "Ollama API" }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {}
+  },
+  "postCreateCommand": "git config --global --add safe.directory /app 2>/dev/null || true; npm install",
+  "remoteEnv": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8082"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "sh",
+        "terminal.integrated.cwd": "/app"
+      }
+    }
+  }
+}
