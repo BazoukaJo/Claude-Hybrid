@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "start": "node router/server.js",
-    "test": "node --test tests/model-utils.test.cjs tests/routing-logic.test.cjs tests/daily-routing-scenarios.test.cjs tests/local-model-picker.test.cjs tests/auto-default-models.test.cjs tests/ollama-enrich-cap.test.cjs tests/ollama-model-presets.test.cjs tests/cloud-fallback.test.cjs tests/privacy-redactor.test.cjs tests/privacy-cloud-http.test.cjs tests/router-health.test.cjs tests/router-http.test.cjs tests/router-admin-http.test.cjs tests/dashboard-recent-smoke.cjs tests/dashboard-inline-script-syntax.cjs",
+    "merge-env": "node scripts/merge-claude-hybrid-env.js",
+    "test": "node --test tests/model-utils.test.cjs tests/routing-logic.test.cjs tests/routing-threshold-bounds.test.cjs tests/daily-routing-scenarios.test.cjs tests/local-model-picker.test.cjs tests/auto-default-models.test.cjs tests/ollama-enrich-cap.test.cjs tests/ollama-model-presets.test.cjs tests/cloud-fallback.test.cjs tests/privacy-redactor.test.cjs tests/privacy-cloud-http.test.cjs tests/router-health.test.cjs tests/router-http.test.cjs tests/router-admin-http.test.cjs tests/dashboard-recent-smoke.cjs tests/dashboard-inline-script-syntax.cjs",
     "test:e2e-ui": "node tests/e2e-ui-screenshots.cjs",
     "test:all": "npm test && npm run test:e2e-ui"
   },

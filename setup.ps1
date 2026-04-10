@@ -219,7 +219,10 @@ function Ensure-Models {
 }
 
 function Ensure-AnthropicBaseUrl {
-    $want = "http://localhost:8082"
+    # Match merge-claude-hybrid-env.js (127.0.0.1 avoids IPv6 localhost issues; same port as ROUTER_PORT).
+    $port = $env:ROUTER_PORT
+    if (-not $port) { $port = "8082" }
+    $want = "http://127.0.0.1:$port"
     $cur  = [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
     if ($cur -eq $want) {
         Write-Step "`[Routing] ANTHROPIC_BASE_URL already $want" Green
@@ -251,6 +254,7 @@ function Ensure-ClaudeSettingsHybridEnv {
         return
     }
     try {
+        if (-not $env:ROUTER_PORT -or $env:ROUTER_PORT -eq '') { $env:ROUTER_PORT = '8082' }
         $out = & node $merge 2>&1
         foreach ($line in $out) { Write-Step "        $line" Gray }
     } catch {

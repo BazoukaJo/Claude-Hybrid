@@ -3,6 +3,7 @@
 const LIMIT_MARKERS = [
   "you've hit your limit",
   "you have hit your limit",
+  "hit your limit for claude",
   "rate limit",
   "exceeded your current quota",
   "insufficient credits",
@@ -10,7 +11,9 @@ const LIMIT_MARKERS = [
 ];
 
 function matchesLimitMarker(text) {
-  const lower = String(text || "").toLowerCase();
+  const lower = String(text || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'");
   return LIMIT_MARKERS.some((marker) => lower.includes(marker));
 }
 
@@ -60,6 +63,20 @@ function collectSseMessages(text, out) {
   }
 }
 
+/** True when JSON (any depth) includes Anthropic quota-style error types. */
+function valueContainsRateLimitType(value, depth = 0) {
+  if (!value || depth > 18) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => valueContainsRateLimitType(item, depth + 1));
+  }
+  if (typeof value !== "object") return false;
+  const t = value.type;
+  if (t === "rate_limit_error") return true;
+  return Object.keys(value).some((k) =>
+    valueContainsRateLimitType(value[k], depth + 1),
+  );
+}
+
 function collectCandidates(statusCode, bodyText, contentType = "") {
   const candidates = [];
   const text = String(bodyText || "");
@@ -87,13 +104,29 @@ function getCloudLimitFeedback(statusCode, bodyText, contentType = "") {
   const match = candidates
     .filter(matchesLimitMarker)
     .sort((a, b) => String(a).length - String(b).length)[0];
-  return match ? String(match).trim() : "";
+  if (match) return String(match).trim();
+  if (Number(statusCode) === 429) return "HTTP 429 from Anthropic (rate limited)";
+  return "";
 }
 
 function isCloudLimitResponse(statusCode, bodyText, contentType = "") {
+  if (Number(statusCode) === 429) return true;
+  const text = String(bodyText || "");
   const candidates = collectCandidates(statusCode, bodyText, contentType);
-
-  return candidates.some(matchesLimitMarker);
+  if (candidates.some(matchesLimitMarker)) return true;
+  const parsed = tryParseJson(text);
+  if (parsed && valueContainsRateLimitType(parsed)) return true;
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("event-stream") || text.includes("data:")) {
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const pl = line.slice(5).trim();
+      if (!pl || pl === "[DONE]") continue;
+      const p = tryParseJson(pl);
+      if (p && valueContainsRateLimitType(p)) return true;
+    }
+  }
+  return false;
 }
 
 module.exports = {

@@ -21,6 +21,7 @@ const {
 const {
   analyzeMessages,
   normalizeRoutingMode,
+  sanitizeRoutingThresholds,
 } = require("./lib/routing-logic");
 const { createMetrics } = require("./lib/metrics");
 const {
@@ -152,6 +153,7 @@ function normalizeLocalCfg() {
 }
 function normalizeRoutingCfg() {
   CFG.routing.mode = normalizeRoutingMode(CFG.routing && CFG.routing.mode);
+  sanitizeRoutingThresholds(CFG.routing);
 }
 loadAndApply(CFG, routerDir);
 normalizeLocalCfg();
@@ -180,6 +182,33 @@ const PARAM_DEFAULTS = {
   frequency_penalty: 0.0,
   min_p: 0.05,
 };
+
+/** Align with dashboard generation sliders and Ollama practical limits. */
+const GEN_NUM_CTX_MIN = 512;
+const GEN_NUM_CTX_MAX = 131072;
+const GEN_MAX_TOKENS_OUT = 131072;
+
+function clampEffectiveParams(p) {
+  const out = { ...p };
+  let nctx = Number(out.num_ctx);
+  if (!Number.isFinite(nctx)) nctx = PARAM_DEFAULTS.num_ctx;
+  nctx = Math.round(nctx);
+  nctx = Math.max(GEN_NUM_CTX_MIN, Math.min(GEN_NUM_CTX_MAX, nctx));
+  out.num_ctx = nctx;
+  let np = Number(out.num_predict);
+  if (!Number.isFinite(np)) np = PARAM_DEFAULTS.num_predict;
+  if (np < 0) {
+    out.num_predict = -1;
+  } else {
+    np = Math.round(np);
+    np = Math.max(1, Math.min(GEN_MAX_TOKENS_OUT, np));
+    const maxOut = Math.max(256, nctx - 64);
+    if (np > maxOut) np = maxOut;
+    out.num_predict = np;
+  }
+  return out;
+}
+
 /** Sparse overrides on top of builtInParamsForModel (preset + generic defaults). */
 let modelParams = {};
 let perModelParams = {};
@@ -301,7 +330,10 @@ function getPartialOverride(modelName) {
   return {};
 }
 function effectiveParamsFor(modelName) {
-  return { ...globalLayerMerged(modelName), ...getPartialOverride(modelName) };
+  return clampEffectiveParams({
+    ...globalLayerMerged(modelName),
+    ...getPartialOverride(modelName),
+  });
 }
 function cleanGlobalParamsFromJson(parsed) {
   const merged = {
@@ -931,11 +963,28 @@ function buildOpenAI(body, p, ollamaModelName) {
   }));
   const ollamaName =
     (ollamaModelName && String(ollamaModelName).trim()) || CFG.local.model;
+  const ctxNum = Number(p.num_ctx);
+  const ctx =
+    Number.isFinite(ctxNum) && ctxNum > 0
+      ? Math.floor(ctxNum)
+      : PARAM_DEFAULTS.num_ctx;
+  let maxTok;
+  if (p.num_predict > 0) {
+    maxTok = Math.floor(Number(p.num_predict));
+  } else {
+    const fromBody =
+      body.max_tokens != null ? Number(body.max_tokens) : Number.NaN;
+    maxTok =
+      Number.isFinite(fromBody) && fromBody > 0 ? Math.floor(fromBody) : 8192;
+  }
+  if (!Number.isFinite(maxTok) || maxTok < 1) maxTok = 8192;
+  const outBudget = Math.max(256, ctx - 64);
+  maxTok = Math.min(maxTok, GEN_MAX_TOKENS_OUT, outBudget);
   const out = {
     model: ollamaName,
     messages,
     stream: !!body.stream,
-    max_tokens: p.num_predict > 0 ? p.num_predict : body.max_tokens || 8192,
+    max_tokens: maxTok,
     temperature: p.temperature,
     top_p: p.top_p,
     top_k: p.top_k,
@@ -1147,6 +1196,10 @@ function ollamaUnreachableMayUseCloud() {
 }
 
 function proxyCloud(incoming, rawBody, body, res, fallback = false) {
+  const cloudLimitRoute = {
+    dest: "local",
+    reason: "cloud limit detected, fallback to local",
+  };
   const cloudTransport = CFG.cloud.protocol === "http" ? http : https;
   const privacy = redactCloudRequestBody(body, CFG.privacy.cloud_redaction);
   const cloudBody = privacy.changed ? privacy.body : body;
@@ -1179,8 +1232,7 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
     },
   };
   const req = cloudTransport.request(opts, (upstream) => {
-    const canFallbackLocal =
-      !fallback && normalizeRoutingMode(CFG.routing.mode) !== "cloud";
+    const canFallbackLocal = !fallback;
     if (streaming) {
       if (upstream.statusCode >= 400) {
         const chunks = [];
@@ -1203,7 +1255,7 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
           ) {
             markCloudQuotaExceeded(feedback || bodyTxt);
             routeTo("local", "cloud limit detected, fallback to local", true);
-            return proxyLocal(incoming, body, res, rawBody);
+            return proxyLocal(incoming, body, res, rawBody, cloudLimitRoute);
           }
           res.writeHead(upstream.statusCode, {
             "Content-Type": "application/json",
@@ -1255,10 +1307,10 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
             upstream.destroy();
           } catch {}
           routeTo("local", "cloud limit detected, fallback to local", true);
-          void proxyLocal(incoming, body, res, rawBody);
+          void proxyLocal(incoming, body, res, rawBody, cloudLimitRoute);
           return;
         }
-        if (preview.includes("\n\n") || sniffedBytes >= 16384) {
+        if (preview.includes("\n\n") || sniffedBytes >= 65536) {
           flushStream();
         }
       });
@@ -1299,7 +1351,7 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
       ) {
         markCloudQuotaExceeded(feedback || bodyTxt);
         routeTo("local", "cloud limit detected, fallback to local", true);
-        return proxyLocal(incoming, body, res, rawBody);
+        return proxyLocal(incoming, body, res, rawBody, cloudLimitRoute);
       }
       if (upstream.statusCode < 400) clearCloudQuotaExceeded();
       res.writeHead(upstream.statusCode, {
@@ -2222,10 +2274,6 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
     </div>
     <div class="routing-mode-status" id="routing-mode-status" role="status" aria-live="polite"></div>
     <h3 class="dash-subsection-title" id="dash-ollama-runtime-h">Ollama runtime</h3>
-    <p class="pool-explainer" style="margin-top:4px;margin-bottom:8px">Loaded models are highlighted. This runtime list also shows every pooled model so you can inspect details or edit settings even when a tag is not currently in VRAM. Loaded models auto-unload after idle time.</p>
-    <div class="svc-btns vram-model-actions" id="vram-global-actions" style="margin-bottom:10px" role="group" aria-label="Load default model in Ollama">
-      <button type="button" class="svc-btn start" id="btn-m-start" title="Load configured default model into VRAM" onclick="void modelAction('/api/router/model/start')">&#9654; Start default</button>
-    </div>
     <p class="params-sub pool-hint-line" id="vram-default-hint" style="display:none;margin-bottom:8px" role="status" aria-live="polite"></p>
     <div id="vram-cards-root" class="model-cards-row row" role="list" aria-labelledby="dash-ollama-runtime-h"></div>
     <h2 class="dash-section-title" id="dash-models-h">Models &amp; routing</h2>
@@ -2270,7 +2318,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
       <span class="params-hdr-label">Sliders</span>
       <div class="pact">
         <span class="saved-msg" id="saved-msg" aria-live="polite">Saved &#10003;</span>
-        <button type="button" class="pbtn pbtn-reset" onclick="resetParams()">Reset defaults</button>
+        <button type="button" class="pbtn pbtn-reset" onclick="void resetParams()">Reset defaults</button>
       </div>
     </div>
     <div class="params-grid">
@@ -2814,13 +2862,6 @@ function vramNamesMatch(cfg, psName){
   const sa=vramStripTagLoose(a), sb=vramStripTagLoose(b);
   return sa===sb || a===sb || sa===b;
 }
-function setVramActionButtons(d){
-  const globalBar=document.getElementById('vram-global-actions');
-  const hasAny=Array.isArray(d.loaded_list)&&d.loaded_list.length>0;
-  if(globalBar) globalBar.style.display=hasAny?'none':'';
-  const st=document.getElementById('btn-m-start');
-  if(st) st.disabled=!!d.configured_loaded;
-}
 function specItem(iconChar, label, value, title){
   const row=document.createElement('div');
   row.className='spec-item';
@@ -3122,7 +3163,7 @@ function renderVramSection(d){
       hint.textContent='No pooled model is currently loaded in VRAM. Settings and model details remain available below.';
       hint.style.display='block';
     }else if(!d.configured_loaded&&cfg){
-      hint.textContent='Loaded models are highlighted. Unloaded pooled models stay available below for monitoring and settings.';
+      hint.textContent='Default model is not loaded in VRAM yet. Ollama loads weights on first use. Pool entries below remain available for settings and details.';
       hint.style.display='block';
     }
   }
@@ -3148,7 +3189,6 @@ async function refreshModel(){
     const r=await fetchWithTimeout('/api/model-status',25000); if(!r.ok)return;
     const d=await r.json();
     renderVramSection(d);
-    setVramActionButtons(d);
     applyCapabilityStates(d.capabilities);
     const reqEl=document.querySelector('.js-vram-router-req');
     if(reqEl){
@@ -3162,36 +3202,6 @@ async function refreshModel(){
   }
 }
 
-async function burstRefreshAfterModelAction(){
-  const delays=[450,550,700,900,1100,1300];
-  for(let i=0;i<delays.length;i++){
-    await new Promise(r=>setTimeout(r,delays[i]));
-    await refreshModel();
-    await refreshOllamaModelList();
-  }
-  await syncGenerationSlidersFromServer();
-  await refreshHealth();
-}
-async function modelAction(url){
-  try{
-    await routerFetch(url,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
-    await new Promise(x=>setTimeout(x,500));
-    await refreshModel();
-    await syncGenerationSlidersFromServer();
-    await refreshHealth();
-    void burstRefreshAfterModelAction();
-  }catch{}
-}
-async function cardModelAction(url,modelName){
-  try{
-    await routerFetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:modelName})});
-    await new Promise(x=>setTimeout(x,500));
-    await refreshModel();
-    await syncGenerationSlidersFromServer();
-    await refreshHealth();
-    void burstRefreshAfterModelAction();
-  }catch{}
-}
 function openCardModelInfo(modelName){
   const modal=document.getElementById('model-info-modal');
   if(!modal)return;
@@ -3657,7 +3667,7 @@ async function syncGenerationSlidersFromServer(){
   }catch{}
 }
 function saveParams(){
-  routerFetch('/api/model-params',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(current)})
+  return routerFetch('/api/model-params',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(current)})
     .then(async (r)=>{
       if(!r.ok){ await alertFailedSave(r,'Save generation'); return; }
       const m=document.getElementById('saved-msg'); if(m){m.style.opacity=1; setTimeout(()=>m.style.opacity=0,2200);}
@@ -3665,7 +3675,34 @@ function saveParams(){
       await refreshModel();
     });
 }
-function resetParams(){ applyValues(DEFAULTS); void saveParams(); }
+/** Reset global generation sliders to built-in (generic defaults + model-family preset), clearing sparse global overrides. */
+async function resetParams(){
+  try{
+    let bi=null;
+    if(window.__paramsFull&&window.__paramsFull.built_in&&typeof window.__paramsFull.built_in==='object')
+      bi=window.__paramsFull.built_in;
+    else{
+      const r=await fetchWithTimeout('/api/model-params-full',20000);
+      if(r.ok){
+        const d=await r.json();
+        window.__paramsFull=d;
+        bi=d.built_in;
+      }
+    }
+    if(bi&&typeof bi==='object'){
+      const o={};
+      for(const k of Object.keys(DEFAULTS)){
+        const v=bi[k];
+        o[k]=typeof v==='number'&&Number.isFinite(v)?v:DEFAULTS[k];
+      }
+      applyValues(o);
+      await saveParams();
+      return;
+    }
+  }catch(e){ console.error(e); }
+  applyValues(DEFAULTS);
+  await saveParams();
+}
 try{ refreshParamOverrides(); }catch(e){ console.error(e); }
 function toggleAdv(){
   const d=document.getElementById('params-adv'), t=document.getElementById('adv-toggle');

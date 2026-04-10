@@ -91,7 +91,7 @@ function spawnRouter(routerDir, env = {}) {
   });
 }
 
-function createMockCloudServer() {
+function createMockCloudServer(responder) {
   const state = {
     requests: [],
   };
@@ -105,6 +105,10 @@ function createMockCloudServer() {
           body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
         } catch {}
         state.requests.push(body);
+        if (typeof responder === "function") {
+          responder(req, res, body, state);
+          return;
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -445,4 +449,129 @@ test("privacy e2e: local-mode request is not redacted before Ollama send", async
   assert.ok(!payload.includes("SECRET_"), payload);
   assert.ok(!payload.includes("TERM_"), payload);
   assert.ok(!payload.includes("PATH_"), payload);
+});
+
+test("cloud quota e2e: Claude limit response falls back to Ollama immediately", async (t) => {
+  const routerDir = path.join(__dirname, "..", "router");
+  const routerPort = await getFreePort();
+  const tmpCfg = path.join(
+    os.tmpdir(),
+    `hybrid-cloud-limit-${process.pid}-${Date.now()}.json`,
+  );
+  fs.writeFileSync(
+    tmpCfg,
+    `${JSON.stringify({
+      local: {
+        model: "local:test",
+        models: ["local:test"],
+        smart_routing: false,
+        fast_model: "",
+      },
+      routing: { mode: "cloud" },
+    })}\n`,
+    "utf8",
+  );
+
+  const mockCloud = createMockCloudServer((_req, res) => {
+    res.writeHead(429, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        type: "error",
+        error: {
+          type: "rate_limit_error",
+          message:
+            "You’ve hit your limit for Claude messages. Limits will reset at 3:00 PM.",
+        },
+      }),
+    );
+  });
+  await new Promise((resolve) =>
+    mockCloud.server.listen(0, "127.0.0.1", resolve),
+  );
+  const cloudPort = mockCloud.server.address().port;
+
+  const mockOllama = createMockLocalOllamaServer();
+  await new Promise((resolve) =>
+    mockOllama.server.listen(0, "127.0.0.1", resolve),
+  );
+  const ollamaPort = mockOllama.server.address().port;
+
+  const child = spawnRouter(routerDir, {
+    ...process.env,
+    ROUTER_PORT: String(routerPort),
+    ROUTER_HYBRID_CONFIG: tmpCfg,
+    ROUTER_CLOUD_PROTOCOL: "http",
+    ROUTER_CLOUD_HOST: "127.0.0.1",
+    ROUTER_CLOUD_PORT: String(cloudPort),
+    ROUTER_OLLAMA_HOST: "127.0.0.1",
+    ROUTER_OLLAMA_PORT: String(ollamaPort),
+  });
+
+  t.after(() => {
+    try {
+      child.kill("SIGTERM");
+    } catch {}
+    const kill = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }, 1500);
+    kill.unref();
+    try {
+      mockCloud.server.close();
+    } catch {}
+    try {
+      mockOllama.server.close();
+    } catch {}
+    try {
+      fs.unlinkSync(tmpCfg);
+    } catch {}
+  });
+
+  await waitFor(async () => {
+    const r = await httpRequest(
+      "GET",
+      `http://127.0.0.1:${routerPort}/api/health`,
+    );
+    return r.status === 200;
+  });
+
+  const requestBody = {
+    model: "claude-3-5-sonnet-20241022",
+    max_tokens: 120,
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "answer briefly" }],
+      },
+    ],
+  };
+
+  const routed = await httpRequest(
+    "POST",
+    `http://127.0.0.1:${routerPort}/v1/messages`,
+    JSON.stringify(requestBody),
+  );
+  assert.strictEqual(routed.status, 200, routed.body);
+  const routedJson = JSON.parse(routed.body || "{}");
+  assert.strictEqual(routedJson.role, "assistant", routed.body);
+  assert.ok(mockCloud.state.requests.length > 0, "cloud request should happen");
+  assert.ok(
+    mockOllama.state.requests.length > 0,
+    "local fallback should happen",
+  );
+
+  const stats = await httpRequest(
+    "GET",
+    `http://127.0.0.1:${routerPort}/api/stats`,
+  );
+  assert.strictEqual(stats.status, 200, stats.body);
+  const statsJson = JSON.parse(stats.body || "{}");
+  assert.strictEqual(statsJson.cloud_quota.exceeded, true, stats.body);
+  assert.ok(
+    String(statsJson.cloud_quota.message || "")
+      .toLowerCase()
+      .includes("hit your limit"),
+    stats.body,
+  );
 });

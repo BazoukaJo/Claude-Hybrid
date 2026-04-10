@@ -6,7 +6,16 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROUTER_URLS = new Set(['http://localhost:8082', 'http://127.0.0.1:8082']);
+function kitRouterUrls() {
+  const p = String(process.env.ROUTER_PORT || process.env.PORT || '8082').trim();
+  const set = new Set([
+    'http://localhost:8082',
+    'http://127.0.0.1:8082',
+    `http://localhost:${p}`,
+    `http://127.0.0.1:${p}`,
+  ]);
+  return set;
+}
 
 function main() {
   const dir = path.join(process.env.USERPROFILE || process.env.HOME || '', '.claude');
@@ -31,7 +40,7 @@ function main() {
     console.log('settings.json: ANTHROPIC_BASE_URL not set — unchanged.');
     return;
   }
-  if (!ROUTER_URLS.has(String(v).trim())) {
+  if (!kitRouterUrls().has(String(v).trim())) {
     console.log('settings.json: ANTHROPIC_BASE_URL is custom — left as-is:', v);
     return;
   }

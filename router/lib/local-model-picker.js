@@ -119,6 +119,16 @@ function analyzeLocalTask(body) {
     heavyKeywords.some((k) => t.includes(k)) ||
     toolResultsThisTurn >= 5;
 
+  /** Distinct from “heavy” coding context: math, proofs, explicit reasoning (can be short prompts). */
+  const reasoningKeywords = [
+    'prove ', 'proof ', 'theorem', 'lemma', 'step by step', 'step-by-step',
+    'why does', 'explain why', 'chain of thought', 'mathematical', 'equation',
+    'integrate ', 'derivative ', 'logic puzzle', 'brain teaser', 'deduce',
+    'infer from', 'formal verification', 'induction', 'contradiction',
+    'probability that', 'expected value', 'combinatorics',
+  ];
+  const prefersReasoning = reasoningKeywords.some((k) => t.includes(k));
+
   /** Latency-oriented prompts (router analogue to “draft path” / small model — not true speculative decoding). */
   const speedKeywords = [
     'quick answer', 'quickly', 'brief', 'briefly', 'short answer', 'in one sentence',
@@ -137,6 +147,7 @@ function analyzeLocalTask(body) {
     toolResultsThisTurn,
     needsVision,
     prefersHeavy,
+    prefersReasoning: !!prefersReasoning && !prefersSpeed,
     prefersSpeed,
   };
 }
@@ -151,13 +162,21 @@ function nameSuggestsTools(name) {
 
 /** Coding-oriented tags (tool + code quality) — boosts when tools are in play or tool results are heavy. */
 function nameSuggestsCoder(name) {
-  return /coder|code-|starcoder|codestral|codellama|deepseek.*coder|qwen.*coder|granite-code|command-r|devstral|mistral-nemo|phi4|gpt-oss|solar-pro|wizardcoder|phind|duckdb-nsm/i.test(
+  return /coder|code-|starcoder|codestral|codellama|deepseek.*coder|qwen.*coder|granite-code|command-r|devstral|mistral-nemo|phi4|gpt-oss|solar-pro|wizardcoder|phind|duckdb-nsm|gemma|llama3|llama-3|qwen2|qwen3|mistral|mixtral/i.test(
     String(name || ''),
   );
 }
 
+/** Tags often used for reasoning / thinking variants (complements Ollama capability flags). */
+function nameSuggestsReasoning(name) {
+  return /\b(r1\b|qwq|deepseek-r1|reasoning|think|thinking|-think|magistral|nemotron|gpt-oss|olmo|exaone)/i.test(
+    String(name || ''),
+  );
+}
+
+/** Only models explicitly marked non-tool should be skipped when Claude sends a tool schema. */
 function toolCapableProfile(p) {
-  return p.has_tools === true || nameSuggestsTools(p.name);
+  return p.has_tools !== false;
 }
 
 /**
@@ -186,6 +205,7 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
   const needsVision = !!task.needsVision;
   const prefersHeavy = !!task.prefersHeavy;
   const prefersSpeed = !!task.prefersSpeed;
+  const prefersReasoning = !!task.prefersReasoning;
 
   const viable = profiles.filter((p) => {
     if (p.context_max != null && Number.isFinite(p.context_max) && p.context_max < minCtx) return false;
@@ -237,6 +257,12 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
       s += 24;
     }
 
+    if (prefersReasoning) {
+      if (p.has_reasoning === true) s += 13;
+      if (nameSuggestsReasoning(p.name)) s += 11;
+      s += Math.min(20, pb * 1.25);
+    }
+
     if (norm(p.name) === norm(defaultModel)) s += 3;
     return s;
   };
@@ -256,6 +282,7 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
   if (fastNorm && prefersSpeed && norm(winner.name) === fastNorm) reason += ' · fast_model';
   if (needsVision) reason += ' · vision';
   if (toolsInSchema) reason += ' · tools in schema';
+  if (prefersReasoning) reason += ' · reasoning-oriented prompt';
   if (activeToolPayload) {
     reason += ` · ${toolResultsThisTurn} tool results this turn`;
     if (midToolTurn) reason += ' · mid tool-turn';
@@ -274,4 +301,5 @@ module.exports = {
   pickBestLocalModel,
   nameSuggestsVision,
   nameSuggestsCoder,
+  nameSuggestsReasoning,
 };

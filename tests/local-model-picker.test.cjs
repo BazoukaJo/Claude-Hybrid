@@ -218,3 +218,49 @@ test('pickBestLocalModel: many tool results this turn prefers larger model (heav
   const { model } = pickBestLocalModel(profiles, task, 'small:latest', 4096);
   assert.strictEqual(model, 'huge:latest');
 });
+
+test('analyzeLocalTask: reasoning keywords set prefersReasoning (unless speed-priority)', () => {
+  const t1 = analyzeLocalTask({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'Prove step by step that sqrt(2) is irrational.' }] }],
+  });
+  assert.strictEqual(t1.prefersReasoning, true);
+  const t2 = analyzeLocalTask({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'Give a brief one-sentence summary of induction proofs.' }] }],
+  });
+  assert.strictEqual(t2.prefersSpeed, true);
+  assert.strictEqual(t2.prefersReasoning, false);
+});
+
+test('pickBestLocalModel: reasoning-oriented prompt prefers stronger reasoning profile', () => {
+  const profiles = [
+    { name: 'tiny-general:latest', context_max: 8192, has_vision: false, has_tools: true, has_reasoning: false, param_billions: 3, family: 't' },
+    { name: 'think-big:latest', context_max: 8192, has_vision: false, has_tools: true, has_reasoning: true, param_billions: 8, family: 'b' },
+  ];
+  const task = analyzeLocalTask({
+    tools: [{ name: 'x', input_schema: {} }],
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Explain why this recurrence solves to O(n log n). Show the induction.' }] },
+    ],
+  });
+  assert.strictEqual(task.prefersReasoning, true);
+  const { model, reason } = pickBestLocalModel(profiles, task, 'tiny-general:latest', 4096);
+  assert.strictEqual(model, 'think-big:latest');
+  assert.ok(reason.includes('reasoning-oriented'), reason);
+});
+
+test('pickBestLocalModel: explicit has_tools false excluded when tools in schema', () => {
+  const profiles = [
+    { name: 'notool:latest', context_max: 32768, has_vision: null, has_tools: false, has_reasoning: null, param_billions: 2, family: 'n' },
+    { name: 'ok:latest', context_max: 32768, has_vision: null, has_tools: true, has_reasoning: null, param_billions: 8, family: 'o' },
+  ];
+  const task = {
+    estTokens: 200,
+    toolsInSchema: true,
+    toolResultsThisTurn: 0,
+    needsVision: false,
+    prefersHeavy: false,
+    prefersSpeed: false,
+  };
+  const { model } = pickBestLocalModel(profiles, task, 'ok:latest', 4096);
+  assert.strictEqual(model, 'ok:latest');
+});

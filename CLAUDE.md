@@ -92,7 +92,7 @@ ollama pull gemma4:e4b
 # or: .\setup.ps1 -RoutingOnly
 ```
 
-Restart the IDE after setup. The **Claude consumer desktop app** is not the same integration path as Claude Code; prefer terminal **`claude`** or IDE extensions.
+Restart the IDE after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, Cursor/VS Code terminal env, and User `ANTHROPIC_BASE_URL`), then **fully quit** the IDE and reopen. The **Claude consumer desktop app** is not the same integration path as Claude Code; prefer terminal **`claude`** or IDE extensions.
 
 ## Manual controls
 
@@ -106,7 +106,7 @@ $env:ANTHROPIC_BASE_URL = ""   # force cloud for this session
 claude
 [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
 .\scripts\diagnose-claude-hybrid.ps1
-node scripts\merge-claude-hybrid-env.js
+npm run merge-env
 ```
 
 The dashboard footer log hydrates from `/api/logs` and then follows `/events`, so an empty footer after refresh is a bug rather than expected behavior.

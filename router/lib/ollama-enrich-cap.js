@@ -1,6 +1,13 @@
 'use strict';
 
-const OLLAMA_CONTEXT_ENRICH_CAP = 20;
+const _envCap = process.env.ROUTER_OLLAMA_ENRICH_CAP;
+const _rawEnrichCap =
+  _envCap != null && String(_envCap).trim() !== ''
+    ? Number(process.env.ROUTER_OLLAMA_ENRICH_CAP)
+    : Number.NaN;
+const OLLAMA_CONTEXT_ENRICH_CAP = Number.isFinite(_rawEnrichCap)
+  ? Math.max(5, Math.min(100, Math.floor(_rawEnrichCap)))
+  : 20;
 
 /**
  * When the library is larger than `cap`, only the first `cap` names (alphabetical) are enriched;

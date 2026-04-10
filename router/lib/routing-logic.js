@@ -2,6 +2,50 @@
 
 const ROUTING_MODES = ["hybrid", "cloud", "local"];
 
+/** Estimated-token gate for hybrid routing (~chars/4). Not too low or every turn hits cloud; not unbounded. */
+const ROUTING_TOKEN_THRESHOLD_MIN = 1000;
+const ROUTING_TOKEN_THRESHOLD_MAX = 2_000_000;
+const ROUTING_TOKEN_THRESHOLD_DEFAULT = 5000;
+
+/** Tool-result blocks in the *last user message* that trigger cloud. */
+const ROUTING_FILE_READ_THRESHOLD_MIN = 1;
+const ROUTING_FILE_READ_THRESHOLD_MAX = 256;
+const ROUTING_FILE_READ_THRESHOLD_DEFAULT = 7;
+
+function toIntRoutingField(value, defaultVal) {
+  if (value == null || value === "") return defaultVal;
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return defaultVal;
+  return n;
+}
+
+/**
+ * Effective thresholds for routing math (pure; does not mutate).
+ * Invalid or missing values fall back to shipped defaults, then clamp to safe ranges.
+ */
+function getEffectiveThresholds(routingCfg) {
+  const r = routingCfg && typeof routingCfg === "object" ? routingCfg : {};
+  let tt = toIntRoutingField(r.tokenThreshold, ROUTING_TOKEN_THRESHOLD_DEFAULT);
+  let fr = toIntRoutingField(r.fileReadThreshold, ROUTING_FILE_READ_THRESHOLD_DEFAULT);
+  tt = Math.max(
+    ROUTING_TOKEN_THRESHOLD_MIN,
+    Math.min(ROUTING_TOKEN_THRESHOLD_MAX, tt),
+  );
+  fr = Math.max(
+    ROUTING_FILE_READ_THRESHOLD_MIN,
+    Math.min(ROUTING_FILE_READ_THRESHOLD_MAX, fr),
+  );
+  return { tokenThreshold: tt, fileReadThreshold: fr };
+}
+
+/** Mutates `routing` in place so CFG and /api/stats always reflect clamped values. */
+function sanitizeRoutingThresholds(routing) {
+  if (!routing || typeof routing !== "object") return;
+  const e = getEffectiveThresholds(routing);
+  routing.tokenThreshold = e.tokenThreshold;
+  routing.fileReadThreshold = e.fileReadThreshold;
+}
+
 const CONCISE_LOCAL_HINTS = [
   "brief",
   "briefly",
@@ -100,9 +144,10 @@ function normalizeRoutingMode(value) {
  */
 function analyzeMessages(body, routingCfg) {
   const msgs = body.messages || [];
-  const tokenThreshold = routingCfg.tokenThreshold;
-  const fileReadThreshold = routingCfg.fileReadThreshold;
-  const keywords = routingCfg.keywords || [];
+  const { tokenThreshold, fileReadThreshold } =
+    getEffectiveThresholds(routingCfg);
+  const keywords =
+    (routingCfg && routingCfg.keywords) || [];
 
   let chars = 0;
   for (const m of msgs) {
@@ -167,4 +212,14 @@ function analyzeMessages(body, routingCfg) {
   return { dest: "local", reason: "routine task" };
 }
 
-module.exports = { analyzeMessages, normalizeRoutingMode, ROUTING_MODES };
+module.exports = {
+  analyzeMessages,
+  normalizeRoutingMode,
+  ROUTING_MODES,
+  getEffectiveThresholds,
+  sanitizeRoutingThresholds,
+  ROUTING_TOKEN_THRESHOLD_MIN,
+  ROUTING_TOKEN_THRESHOLD_MAX,
+  ROUTING_FILE_READ_THRESHOLD_MIN,
+  ROUTING_FILE_READ_THRESHOLD_MAX,
+};

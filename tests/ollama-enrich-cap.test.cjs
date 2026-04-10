@@ -1,5 +1,7 @@
 'use strict';
 
+delete process.env.ROUTER_OLLAMA_ENRICH_CAP;
+
 const test = require('node:test');
 const assert = require('node:assert');
 const {
@@ -26,6 +28,26 @@ test('selectEnrichmentHead takes first N names alphabetically when over cap', ()
     h.map((x) => x.name),
     sorted.slice(0, OLLAMA_CONTEXT_ENRICH_CAP).map((x) => x.name),
   );
+});
+
+test('OLLAMA_CONTEXT_ENRICH_CAP env is clamped 5..100', () => {
+  try {
+    process.env.ROUTER_OLLAMA_ENRICH_CAP = '3';
+    delete require.cache[require.resolve('../router/lib/ollama-enrich-cap')];
+    let m = require('../router/lib/ollama-enrich-cap');
+    assert.strictEqual(m.OLLAMA_CONTEXT_ENRICH_CAP, 5);
+    delete require.cache[require.resolve('../router/lib/ollama-enrich-cap')];
+    process.env.ROUTER_OLLAMA_ENRICH_CAP = '60';
+    m = require('../router/lib/ollama-enrich-cap');
+    assert.strictEqual(m.OLLAMA_CONTEXT_ENRICH_CAP, 60);
+    delete require.cache[require.resolve('../router/lib/ollama-enrich-cap')];
+    process.env.ROUTER_OLLAMA_ENRICH_CAP = '500';
+    m = require('../router/lib/ollama-enrich-cap');
+    assert.strictEqual(m.OLLAMA_CONTEXT_ENRICH_CAP, 100);
+  } finally {
+    delete process.env.ROUTER_OLLAMA_ENRICH_CAP;
+    delete require.cache[require.resolve('../router/lib/ollama-enrich-cap')];
+  }
 });
 
 test('mergeEnrichedModels preserves original order', () => {

@@ -9,7 +9,10 @@ Write-Host ""
 $userBase = [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
 $sessBase = $env:ANTHROPIC_BASE_URL
 Write-Host "  ANTHROPIC_BASE_URL (User registry):  " -NoNewline
-if ($userBase) { Write-Host $userBase -ForegroundColor $(if ($userBase -eq "http://localhost:8082") { "Green" } else { "Yellow" }) }
+if ($userBase) {
+    $okUser = ($userBase -match '^https?://(127\.0\.0\.1|localhost):8082/?$')
+    Write-Host $userBase -ForegroundColor $(if ($okUser) { "Green" } else { "Yellow" })
+}
 else { Write-Host "(not set)" -ForegroundColor Red }
 
 Write-Host "  ANTHROPIC_BASE_URL (this session):   " -NoNewline
@@ -23,7 +26,8 @@ if (Test-Path $settingsPath) {
         $eb = $j.env.ANTHROPIC_BASE_URL
         Write-Host $settingsPath -ForegroundColor Gray
         Write-Host "    env.ANTHROPIC_BASE_URL = " -NoNewline
-        if ($eb -eq "http://localhost:8082") { Write-Host $eb -ForegroundColor Green }
+        $okEb = ($eb -match '^https?://(127\.0\.0\.1|localhost):8082/?$')
+        if ($okEb) { Write-Host $eb -ForegroundColor Green }
         elseif ($eb) { Write-Host $eb -ForegroundColor Yellow }
         else { Write-Host "(missing - run setup.ps1 or: node scripts\merge-claude-hybrid-env.js)" -ForegroundColor Red }
     } catch {
@@ -59,11 +63,11 @@ if ($rh) { Write-Host $rh -ForegroundColor Gray } else { Write-Host "(unset = bi
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $hc = Join-Path $repoRoot "router\hybrid.config.json"
 Write-Host "  router\hybrid.config.json:           " -NoNewline
-if (Test-Path $hc) { Write-Host "present" -ForegroundColor Green } else { Write-Host "optional — run setup.ps1 to copy example" -ForegroundColor DarkGray }
+if (Test-Path $hc) { Write-Host "present" -ForegroundColor Green } else { Write-Host "optional - run setup.ps1 to copy example" -ForegroundColor DarkGray }
 
 $adm = $env:ROUTER_ADMIN_TOKEN
 Write-Host "  ROUTER_ADMIN_TOKEN:                  " -NoNewline
-if ($adm) { Write-Host "set (dashboard: use Admin token field)" -ForegroundColor Yellow } else { Write-Host "(unset — mutating API open)" -ForegroundColor DarkGray }
+if ($adm) { Write-Host "set (dashboard: use Admin token field)" -ForegroundColor Yellow } else { Write-Host "(unset - mutating API open)" -ForegroundColor DarkGray }
 
 Write-Host "  Notes:" -ForegroundColor DarkGray
 Write-Host "    - Claude Code reads env from your shell OR from ~/.claude/settings.json (env key)." -ForegroundColor DarkGray
@@ -71,4 +75,10 @@ Write-Host "    - Apps started from the taskbar (Cursor, VS Code) often ignore U
 Write-Host "      sign out/in or add env via settings.json (merge script above)." -ForegroundColor DarkGray
 Write-Host "    - The consumer Claude desktop app (claude.ai) does not use this proxy; use" -ForegroundColor DarkGray
 Write-Host "      Claude Code CLI, Cursor, or other API-compatible clients." -ForegroundColor DarkGray
+Write-Host "    - Apply routing to Claude + IDE terminals:  npm run merge-env   (or: setup.ps1)" -ForegroundColor DarkGray
+Write-Host "    - Quota text (e.g. hit your limit for Claude messages) can be from (A) Claude" -ForegroundColor DarkGray
+Write-Host "      Code subscription/auth paths that never hit this router, or (B) Anthropic API" -ForegroundColor DarkGray
+Write-Host "      after the router forwarded a cloud request. Check: when the message appears," -ForegroundColor DarkGray
+Write-Host "      does the router dashboard footer log show a new request? If not, fix env/" -ForegroundColor DarkGray
+Write-Host "      settings.json first - not the hybrid routing code." -ForegroundColor DarkGray
 Write-Host ""

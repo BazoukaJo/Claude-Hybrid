@@ -45,6 +45,20 @@ function httpRequest(method, urlStr, body = null) {
   });
 }
 
+function extractInlineScripts(html) {
+  const out = [];
+  let rest = html;
+  for (;;) {
+    const a = rest.indexOf("<script>");
+    if (a < 0) break;
+    const b = rest.indexOf("</script>", a);
+    if (b < 0) break;
+    out.push(rest.slice(a + 8, b));
+    rest = rest.slice(b + 9);
+  }
+  return out;
+}
+
 async function waitFor(fn, { timeout = 15000, interval = 120 } = {}) {
   const t0 = Date.now();
   let lastErr;
@@ -122,8 +136,7 @@ test("dashboard HTML + system-stats + pool routing POST (no admin token)", async
     'id="routing-mode-btn-cloud"',
     'id="routing-mode-btn-local"',
     'id="routing-mode-status"',
-    "Loaded models are highlighted. This runtime list also shows every pooled model",
-    "Loaded models auto-unload after idle time.",
+    'id="vram-default-hint"',
     "fetch('/api/health'",
   ]) {
     assert.ok(
@@ -134,6 +147,39 @@ test("dashboard HTML + system-stats + pool routing POST (no admin token)", async
   assert.ok(
     !html.includes("dash-intro"),
     "removed intro block should not appear",
+  );
+
+  for (const bad of [
+    "btn-m-start",
+    "vram-global-actions",
+    "Start default",
+    "modelAction(",
+    "/api/router/model/start",
+    "Loaded models are highlighted",
+    "Loaded models auto-unload after idle time",
+  ]) {
+    assert.ok(
+      !html.includes(bad),
+      `dashboard HTML must not regress Ollama manual-start UI: ${bad}`,
+    );
+  }
+  const inlineJs = extractInlineScripts(html).join("\n");
+  for (const bad of [
+    "modelAction",
+    "btn-m-start",
+    "vram-global-actions",
+    "Loaded models are highlighted",
+  ]) {
+    assert.ok(
+      !inlineJs.includes(bad),
+      `dashboard inline script must not reference removed Ollama controls: ${bad}`,
+    );
+  }
+  assert.ok(
+    inlineJs.includes(
+      "Default model is not loaded in VRAM yet. Ollama loads weights on first use.",
+    ),
+    "VRAM hint copy should explain on-demand Ollama load (no dashboard Start button)",
   );
 
   const headerUi = await httpRequest(
