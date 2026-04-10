@@ -1,0 +1,3734 @@
+'use strict';
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude Hybrid Router  —  http://localhost:8082
+// ─────────────────────────────────────────────────────────────────────────────
+const http  = require('http');
+const https = require('https');
+const fs    = require('fs');
+const path  = require('path');
+const os    = require('os');
+const { exec, execFile } = require('child_process');
+
+// ─── Configuration ────────────────────────────────────────────────────────────
+const {
+  pathOnly,
+  pickRunningModel,
+  firstLoadedPsRow,
+  listPsModels,
+  psModelId,
+  maxContextFromShow,
+} = require('./lib/model-utils');
+const { analyzeMessages, normalizeRoutingMode } = require('./lib/routing-logic');
+const { createMetrics } = require('./lib/metrics');
+const {
+  loadAndApply,
+  watchConfig,
+  saveLocalModel,
+  saveLocalRoutingSettings,
+  saveRoutingMode,
+  localModelUnsetInConfigFile,
+  localFastUnsetInConfigFile,
+} = require('./lib/hybrid-config');
+const { pickAutoDefaultModels } = require('./lib/auto-default-models');
+const { resolveLocalPool, analyzeLocalTask, pickBestLocalModel, parseParameterBillions } = require('./lib/local-model-picker');
+const { requireAdmin, getAdminToken } = require('./lib/admin-auth');
+const { matchPresetPatch } = require('./lib/ollama-model-presets');
+const { selectEnrichmentHead, mergeEnrichedModels } = require('./lib/ollama-enrich-cap');
+
+const CFG = {
+  port:       (() => {
+    const p = Number.parseInt(process.env.ROUTER_PORT || process.env.PORT || '8082', 10);
+    return Number.isFinite(p) && p > 0 ? p : 8082;
+  })(),
+  listenHost: '127.0.0.1',
+  local:      { host: 'localhost', port: 11434, model: 'VladimirGav/gemma4-26b-16GB-VRAM:latest', models: [], smart_routing: true, fast_model: '' },
+  cloud:      { host: 'api.anthropic.com', port: 443 },
+  paramsFile:     path.join(__dirname, '..', '.claude', 'model-params.json'),
+  perModelFile:   path.join(__dirname, '..', '.claude', 'model-params-per-model.json'),
+  resourcesDir:   path.join(__dirname, 'public', 'css'),
+  ollamaLogoCandidates: [
+    path.join(__dirname, '..', '..', 'ollama-dashboard', 'app', 'static', 'ollama-logo.png'),
+    path.join(__dirname, 'ollama-logo.png'),
+  ],
+  routing: {
+    mode: 'hybrid',
+    tokenThreshold:    5000,
+    fileReadThreshold: 7,
+    keywords: [
+      'architect', 'security audit', 'audit', 'design pattern', 'race condition',
+      'performance optim', 'system design', 'data model', 'api design',
+      'from scratch', 'complex bug', 'multi-file', 'deep reason',
+    ].map((k) => String(k).toLowerCase()),
+  },
+};
+
+const metrics = createMetrics();
+const routerDir = __dirname;
+function normalizeLocalCfg() {
+  if (!Array.isArray(CFG.local.models)) CFG.local.models = [];
+  if (typeof CFG.local.smart_routing !== 'boolean') CFG.local.smart_routing = true;
+  if (CFG.local.fast_model == null) CFG.local.fast_model = '';
+  else CFG.local.fast_model = String(CFG.local.fast_model).trim();
+}
+function normalizeRoutingCfg() {
+  CFG.routing.mode = normalizeRoutingMode(CFG.routing && CFG.routing.mode);
+}
+loadAndApply(CFG, routerDir);
+normalizeLocalCfg();
+normalizeRoutingCfg();
+watchConfig(routerDir, () => {
+  loadAndApply(CFG, routerDir);
+  normalizeLocalCfg();
+  normalizeRoutingCfg();
+  console.log(`[hybrid-config] reloaded listen=${CFG.listenHost} model=${CFG.local.model} mode=${CFG.routing.mode} fast=${CFG.local.fast_model || '(none)'} pool=${CFG.local.models.length || 'all-tags'} smart=${CFG.local.smart_routing} thresholds=${CFG.routing.tokenThreshold}/${CFG.routing.fileReadThreshold}`);
+});
+
+// ─── Model parameters ─────────────────────────────────────────────────────────
+const PARAM_DEFAULTS = {
+  temperature: 0.8, top_p: 0.9, top_k: 40, num_ctx: 4096, seed: 0,
+  num_predict: -1, repeat_penalty: 1.1, repeat_last_n: 64,
+  presence_penalty: 0.0, frequency_penalty: 0.0, min_p: 0.05,
+};
+/** Sparse overrides on top of builtInParamsForModel (preset + generic defaults). */
+let modelParams = {};
+let perModelParams = {};
+function coerceParamFileNumbers(obj) {
+  const o = { ...obj };
+  for (const k of Object.keys(PARAM_DEFAULTS)) {
+    if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+    const v = o[k];
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      if (Number.isFinite(n)) o[k] = n;
+    }
+  }
+  return o;
+}
+function builtInParamsForModel(modelName) {
+  return { ...PARAM_DEFAULTS, ...matchPresetPatch(modelName) };
+}
+function globalLayerMerged(modelName) {
+  return { ...builtInParamsForModel(modelName), ...modelParams };
+}
+function sparseGlobalFromFullState(body, modelName) {
+  const baseline = builtInParamsForModel(modelName);
+  const sparse = {};
+  for (const k of Object.keys(PARAM_DEFAULTS)) {
+    const v = body[k];
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    const b = baseline[k];
+    if (typeof b !== 'number' || !Number.isFinite(b) || Math.abs(v - b) > 1e-9) sparse[k] = v;
+  }
+  return sparse;
+}
+function loadParams() {
+  modelParams = {};
+  try {
+    if (!fs.existsSync(CFG.paramsFile)) return;
+    const raw = JSON.parse(fs.readFileSync(CFG.paramsFile, 'utf8'));
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    const allKeys = Object.keys(PARAM_DEFAULTS);
+    const keysInFile = allKeys.filter((k) => Object.prototype.hasOwnProperty.call(raw, k));
+    const merged = coerceParamFileNumbers({ ...PARAM_DEFAULTS, ...raw });
+    if (keysInFile.length >= allKeys.length) {
+      const sparse = {};
+      for (const k of allKeys) {
+        if (!Object.prototype.hasOwnProperty.call(raw, k)) continue;
+        const v = merged[k];
+        const d = PARAM_DEFAULTS[k];
+        if (typeof v === 'number' && Number.isFinite(v) && Math.abs(v - d) > 1e-9) sparse[k] = v;
+      }
+      modelParams = sparse;
+    } else {
+      for (const k of allKeys) {
+        if (!Object.prototype.hasOwnProperty.call(raw, k)) continue;
+        modelParams[k] = merged[k];
+      }
+    }
+  } catch {
+    modelParams = {};
+  }
+}
+function ensureClaudeConfigDir() {
+  try {
+    fs.mkdirSync(path.dirname(CFG.paramsFile), { recursive: true });
+  } catch (e) {
+    console.error('[model-params] mkdir failed:', e && e.message);
+  }
+}
+function saveParams() {
+  try {
+    ensureClaudeConfigDir();
+    fs.writeFileSync(CFG.paramsFile, JSON.stringify(modelParams, null, 2));
+  } catch (e) {
+    console.error('[model-params] save global failed:', e && e.message);
+  }
+}
+function normModelKey(name) { return String(name || '').trim().toLowerCase(); }
+function loadPerModelParams() {
+  try {
+    if (fs.existsSync(CFG.perModelFile)) {
+      const raw = JSON.parse(fs.readFileSync(CFG.perModelFile, 'utf8')) || {};
+      perModelParams = {};
+      for (const [modelKey, patch] of Object.entries(raw)) {
+        if (patch && typeof patch === 'object' && !Array.isArray(patch)) {
+          perModelParams[modelKey] = coerceParamFileNumbers(patch);
+        }
+      }
+    }
+  } catch { perModelParams = {}; }
+}
+function savePerModelParams() {
+  try {
+    ensureClaudeConfigDir();
+    fs.writeFileSync(CFG.perModelFile, JSON.stringify(perModelParams, null, 2));
+  } catch (e) {
+    console.error('[model-params] save per-model failed:', e && e.message);
+  }
+}
+function getPartialOverride(modelName) {
+  const k = normModelKey(modelName);
+  let o = perModelParams[k];
+  if (o && typeof o === 'object') return o;
+  for (const [key, val] of Object.entries(perModelParams)) {
+    if (normModelKey(key) === k && val && typeof val === 'object') return val;
+  }
+  return {};
+}
+function effectiveParamsFor(modelName) {
+  return { ...globalLayerMerged(modelName), ...getPartialOverride(modelName) };
+}
+function cleanGlobalParamsFromJson(parsed) {
+  const merged = { ...PARAM_DEFAULTS, ...(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}) };
+  const c = coerceParamFileNumbers(merged);
+  return sparseGlobalFromFullState(c, CFG.local.model);
+}
+function cleanPerModelFileFromJson(parsed) {
+  const next = {};
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return next;
+  for (const [modelKey, patch] of Object.entries(parsed)) {
+    const nk = normModelKey(modelKey);
+    if (!nk || !patch || typeof patch !== 'object' || Array.isArray(patch)) continue;
+    const c = coerceParamFileNumbers(patch);
+    const clean = {};
+    for (const k of Object.keys(PARAM_DEFAULTS)) {
+      const v = c[k];
+      if (typeof v === 'number' && Number.isFinite(v)) clean[k] = v;
+    }
+    if (Object.keys(clean).length) next[nk] = clean;
+  }
+  return next;
+}
+function readModelParamsFileRaw(which) {
+  const fp = which === 'per-model' ? CFG.perModelFile : CFG.paramsFile;
+  try {
+    if (fs.existsSync(fp)) return fs.readFileSync(fp, 'utf8');
+  } catch {}
+  return which === 'per-model' ? '{}\n' : '{}\n';
+}
+loadParams();
+loadPerModelParams();
+
+// ─── System stats ─────────────────────────────────────────────────────────────
+/** Serialize CPU deltas: parallel /api/system-stats requests shared one aggregate and corrupted % (boot script + doRefresh). */
+let cpuSampleChain = Promise.resolve();
+let lastCpuAgg = null;
+function sumCpuTimes(t) {
+  return Object.values(t).reduce((a, b) => a + b, 0);
+}
+function sampleCpuPercent() {
+  const run = cpuSampleChain.then(() => {
+    try {
+      const cpus = os.cpus();
+      const cur = cpus.reduce((a, c) => {
+        for (const [k, v] of Object.entries(c.times)) a[k] = (a[k] || 0) + v;
+        return a;
+      }, {});
+      let pct = 0;
+      if (lastCpuAgg) {
+        const idle = cur.idle - lastCpuAgg.idle;
+        const total = sumCpuTimes(cur) - sumCpuTimes(lastCpuAgg);
+        pct = total > 0 ? Math.round((1 - idle / total) * 100) : 0;
+      }
+      lastCpuAgg = cur;
+      if (!Number.isFinite(pct)) return null;
+      return Math.min(100, Math.max(0, pct));
+    } catch {
+      return null;
+    }
+  });
+  cpuSampleChain = run.catch(() => null);
+  return run.catch(() => null);
+}
+
+function parseNvidiaSmiCsv(stdout) {
+  if (!stdout || typeof stdout !== 'string') return null;
+  const line = stdout.trim().split(/\r?\n/).find((l) => l.trim());
+  if (!line) return null;
+  const parts = line.split(',').map((s) => parseFloat(String(s).trim()));
+  if (parts.length < 3) return null;
+  const [tot, used, gpu] = parts;
+  if (![tot, used, gpu].every((n) => Number.isFinite(n))) return null;
+  return { vram_total_mb: tot, vram_used_mb: used, gpu_util: gpu };
+}
+
+let nvidiaCache = null, nvidiaCacheAt = 0;
+function getNvidiaSmi() {
+  if (nvidiaCache && Date.now() - nvidiaCacheAt < 5000) return Promise.resolve(nvidiaCache);
+  return new Promise((resolve) => {
+    const opts = { timeout: 4500 };
+    if (process.platform === 'win32') opts.windowsHide = true;
+    try {
+      execFile(
+        'nvidia-smi',
+        ['--query-gpu=memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits'],
+        opts,
+        (err, stdout) => {
+          if (err) {
+            nvidiaCache = null;
+            return resolve(null);
+          }
+          const parsed = parseNvidiaSmiCsv(stdout);
+          if (!parsed) {
+            nvidiaCache = null;
+            return resolve(null);
+          }
+          nvidiaCache = parsed;
+          nvidiaCacheAt = Date.now();
+          resolve(nvidiaCache);
+        },
+      );
+    } catch {
+      nvidiaCache = null;
+      resolve(null);
+    }
+  });
+}
+
+let ollamaVersionCache = null;
+async function getOllamaVersion() {
+  if (ollamaVersionCache) return ollamaVersionCache;
+  const r = await ollamaGet('/api/version');
+  ollamaVersionCache = r?.version || null;
+  return ollamaVersionCache;
+}
+
+// ─── Live log & SSE ───────────────────────────────────────────────────────────
+const LOG_MAX = 200, log = [], clients = new Set();
+function pushLog(entry) {
+  log.push(entry);
+  if (log.length > LOG_MAX) log.shift();
+  const data = `data: ${JSON.stringify(entry)}\n\n`;
+  for (const c of clients) { try { c.write(data); } catch { clients.delete(c); } }
+}
+
+// ─── Routing ──────────────────────────────────────────────────────────────────
+function routeTo(dest, reason, fallback = false, extra = {}) {
+  const time = ts();
+  metrics.recordRoute(dest, reason, fallback, time);
+  const entry = { time, dest, reason, fallback, ...extra };
+  process.stdout.write(`[${entry.time}] ${dest === 'cloud' ? 'CLOUD' : 'LOCAL'} — ${reason}${fallback ? ' (fallback)' : ''}\n`);
+  pushLog(entry);
+  return dest;
+}
+function ts() { return new Date().toISOString().slice(11, 19); }
+function fmt(n) { if (!n) return '—'; const g=n/1e9; return g>=1?g.toFixed(1)+' GB':(n/1e6).toFixed(0)+' MB'; }
+
+// ─── Ollama helpers ───────────────────────────────────────────────────────────
+/** Map Ollama /api/show capabilities[] to booleans (same aliases as ollama-dashboard main.js). */
+function capabilityFlagsFromShow(show) {
+  const unknown = { has_reasoning: null, has_vision: null, has_tools: null };
+  if (!show || typeof show !== 'object') return unknown;
+  const raw = show.details?.capabilities ?? show.capabilities;
+  if (!Array.isArray(raw) || raw.length === 0) return unknown;
+  const capsLower = raw.map((c) => String(c).toLowerCase().trim());
+  const hasAlias = (aliases) => aliases.some((a) => capsLower.includes(a));
+  const visionAliases = ['vision', 'image', 'multimodal'];
+  const toolsAliases = ['tools', 'tool', 'function', 'function-calling', 'tool-use'];
+  const reasoningAliases = ['reasoning', 'thinking', 'think'];
+  return {
+    has_reasoning: hasAlias(reasoningAliases),
+    has_vision: hasAlias(visionAliases),
+    has_tools: hasAlias(toolsAliases),
+  };
+}
+
+function normalizeOllamaTagList(tagsBody) {
+  if (!tagsBody || !Array.isArray(tagsBody.models)) return [];
+  return tagsBody.models.map((m) => ({
+    name: String(m.name || m.model || '').trim(),
+    size: typeof m.size === 'number' ? m.size : null,
+    modified_at: m.modified_at || null,
+    digest: m.digest || null,
+  })).filter((x) => x.name);
+}
+
+function ollamaGet(p) {
+  return new Promise(resolve => {
+    const req = http.request({ hostname: CFG.local.host, port: CFG.local.port, path: p, method: 'GET' }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch { resolve(null); } });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(3000, () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+/** One retry if /api/ps is empty (scheduler race); same idea as ollama-dashboard. */
+async function ollamaGetPsWithRetry() {
+  let ps = await ollamaGet('/api/ps');
+  if (listPsModels(ps).length === 0) {
+    await new Promise((r) => setTimeout(r, 280));
+    ps = await ollamaGet('/api/ps');
+  }
+  return ps;
+}
+function ollamaPost(p, body) {
+  return new Promise(resolve => {
+    const data = JSON.stringify(body);
+    const req = http.request({ hostname: CFG.local.host, port: CFG.local.port, path: p, method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch { resolve(null); } });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(5000, () => { req.destroy(); resolve(null); });
+    req.write(data); req.end();
+  });
+}
+
+function ollamaTouchModel(modelName, keepAlive) {
+  return ollamaPost('/api/generate', {
+    model: modelName,
+    prompt: ' ',
+    stream: false,
+    keep_alive: keepAlive,
+  });
+}
+
+/** Attach context_max from /api/show per tag (bounded concurrency) for installed-library cards. */
+async function enrichModelsWithMaxContext(models) {
+  if (!Array.isArray(models) || models.length === 0) return models;
+  const concurrency = Math.min(4, models.length);
+  const out = models.map((m) => ({ ...m, context_max: null }));
+  let next = 0;
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= out.length) return;
+      const show = await ollamaPost('/api/show', { model: out[i].name });
+      out[i].context_max = maxContextFromShow(show);
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  return out;
+}
+
+/** Enrich a bounded subset so large `ollama list` libraries cannot stall the dashboard. */
+async function enrichModelListWithContextCap(models) {
+  if (!Array.isArray(models) || models.length === 0) return models;
+  const head = selectEnrichmentHead(models);
+  const enrichedHead = await enrichModelsWithMaxContext(head);
+  if (head.length === models.length) return enrichedHead;
+  return mergeEnrichedModels(models, enrichedHead);
+}
+
+function formatParameterCountFromMi(pc) {
+  if (typeof pc !== 'number' || !Number.isFinite(pc) || pc <= 0) return null;
+  const b = pc / 1e9;
+  if (b >= 1) return b >= 10 ? `${Math.round(b)}B` : `${b.toFixed(1)}B`;
+  const m = pc / 1e6;
+  if (m >= 1) return `${Math.round(m)}M`;
+  const k = pc / 1e3;
+  if (k >= 1) return `${Math.round(k)}K`;
+  return String(Math.round(pc));
+}
+
+/** Fill family / parameter_size from `model_info` when `details` is empty (common for some GGUF imports). */
+function enrichDetailsFromModelInfo(details, show) {
+  const d = details && typeof details === 'object' ? { ...details } : {};
+  const mi = show && typeof show === 'object' && show.model_info && typeof show.model_info === 'object' ? show.model_info : {};
+  const strOrNull = (v) => {
+    if (v == null) return null;
+    const s = String(v).trim();
+    return s === '' ? null : s;
+  };
+  if (!strOrNull(d.family)) {
+    if (Array.isArray(d.families) && d.families.length) {
+      const joined = d.families.map((x) => String(x).trim()).filter(Boolean).join(', ');
+      if (joined) d.family = joined;
+    }
+    if (!strOrNull(d.family)) {
+      const arch = strOrNull(mi['general.architecture']);
+      if (arch) d.family = arch;
+    }
+  }
+  if (!strOrNull(d.parameter_size != null ? d.parameter_size : '')) {
+    const raw = mi['general.parameter_count'];
+    const n = typeof raw === 'number' ? raw : (typeof raw === 'string' ? Number(raw) : NaN);
+    const fmted = formatParameterCountFromMi(n);
+    if (fmted) d.parameter_size = fmted;
+  }
+  return d;
+}
+
+function summarizeShow(show) {
+  if (!show || typeof show !== 'object') return null;
+  const d = enrichDetailsFromModelInfo({ ...(show.details || {}) }, show);
+  return {
+    name: show.model || null,
+    family: d.family || null,
+    parameter_size: d.parameter_size || null,
+    quantization_level: d.quantization_level || null,
+    format: d.format || null,
+    license: d.license || show.license || null,
+    modified_at: show.modified_at || null,
+    context_max: maxContextFromShow(show),
+  };
+}
+
+/** /api/ps rows often omit `details`; /api/show has full metadata — merge for the dashboard card. */
+function mergeModelDetailsFromShow(running, show) {
+  if (!running || typeof running !== 'object') return running;
+  const psD = running.details && typeof running.details === 'object' ? { ...running.details } : {};
+  const shD = show && show.details && typeof show.details === 'object' ? { ...show.details } : {};
+  return { ...running, details: { ...psD, ...shD } };
+}
+
+function toFiniteNumberLoose(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/** Precomputed strings/numbers for the dashboard model card (avoids sparse `details` on the client). */
+function buildCardSpecs(show, running) {
+  if (!running || typeof running !== 'object') return null;
+  const merged = mergeModelDetailsFromShow(running, show);
+  const det = enrichDetailsFromModelInfo(merged.details || {}, show);
+  const strOrNull = (v) => {
+    if (v == null) return null;
+    const s = String(v).trim();
+    return s === '' ? null : s;
+  };
+  return {
+    family: strOrNull(det.family),
+    parameter_size: strOrNull(det.parameter_size != null ? det.parameter_size : ''),
+    quantization_level: strOrNull(det.quantization_level != null ? det.quantization_level : ''),
+    size: toFiniteNumberLoose(running.size),
+    size_vram: toFiniteNumberLoose(running.size_vram),
+  };
+}
+
+function contextAllocatedFromPsRow(row) {
+  if (!row || typeof row !== 'object') return null;
+  const tryOne = (v) => {
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.trunc(v);
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) return Math.trunc(n);
+    }
+    return null;
+  };
+  let a = tryOne(row.context_length) ?? tryOne(row.context_size);
+  if (a == null && row.details && typeof row.details === 'object') {
+    a = tryOne(row.details.context_length) ?? tryOne(row.details.context_size);
+  }
+  return a;
+}
+
+const PROFILE_CACHE_TTL_MS = 6 * 60 * 1000;
+let profileCache = { waveAt: 0, map: new Map() };
+
+function buildModelProfile(name, show) {
+  if (!show || typeof show !== 'object' || show.error) {
+    return {
+      name,
+      context_max: null,
+      has_vision: null,
+      has_tools: null,
+      has_reasoning: null,
+      param_billions: null,
+      family: null,
+    };
+  }
+  const caps = capabilityFlagsFromShow(show);
+  const ctx = maxContextFromShow(show);
+  const d = enrichDetailsFromModelInfo({ ...(show.details || {}) }, show);
+  return {
+    name,
+    context_max: ctx,
+    has_vision: caps.has_vision,
+    has_tools: caps.has_tools,
+    has_reasoning: caps.has_reasoning,
+    param_billions: parseParameterBillions(d.parameter_size),
+    family: d.family || null,
+  };
+}
+
+async function ensureProfilesForModels(names) {
+  const now = Date.now();
+  if (now - profileCache.waveAt > PROFILE_CACHE_TTL_MS) {
+    profileCache.map.clear();
+  }
+  profileCache.waveAt = now;
+  const missing = names.filter((n) => !profileCache.map.has(n));
+  await Promise.all(
+    missing.map(async (name) => {
+      const show = await ollamaPost('/api/show', { model: name });
+      profileCache.map.set(name, buildModelProfile(name, show));
+    }),
+  );
+}
+
+// ─── Translation: Anthropic → OpenAI + inject params ─────────────────────────
+function buildOpenAI(body, p, ollamaModelName) {
+  const messages = [];
+  if (body.system) messages.push({ role: 'system', content: body.system });
+  for (const msg of body.messages || []) {
+    if (!Array.isArray(msg.content)) { messages.push({ role: msg.role, content: msg.content || '' }); continue; }
+    const textBlocks    = msg.content.filter(b => b.type === 'text');
+    const toolUseBlocks = msg.content.filter(b => b.type === 'tool_use');
+    const toolResBlocks = msg.content.filter(b => b.type === 'tool_result');
+    if (toolResBlocks.length) {
+      for (const b of toolResBlocks) {
+        const content = Array.isArray(b.content) ? b.content.map(x=>x.text||'').join('\n') : (b.content||'');
+        messages.push({ role: 'tool', tool_call_id: b.tool_use_id, content });
+      }
+      if (textBlocks.length) messages.push({ role: 'user', content: textBlocks.map(b=>b.text).join('\n') });
+    } else if (toolUseBlocks.length) {
+      messages.push({ role: 'assistant', content: textBlocks.map(b=>b.text).join('\n')||null, tool_calls: toolUseBlocks.map(b=>({ id:b.id, type:'function', function:{ name:b.name, arguments:JSON.stringify(b.input||{}) } })) });
+    } else {
+      messages.push({ role: msg.role, content: textBlocks.map(b=>b.text).join('\n') });
+    }
+  }
+  const tools = (body.tools||[]).map(t=>({ type:'function', function:{ name:t.name, description:t.description||'', parameters:t.input_schema||{type:'object',properties:{}} } }));
+  const ollamaName = (ollamaModelName && String(ollamaModelName).trim()) || CFG.local.model;
+  const out = { model: ollamaName, messages, stream: !!body.stream, max_tokens: p.num_predict>0?p.num_predict:(body.max_tokens||8192), temperature: p.temperature, top_p: p.top_p, top_k: p.top_k, seed: p.seed||undefined, repeat_penalty: p.repeat_penalty, repeat_last_n: p.repeat_last_n, presence_penalty: p.presence_penalty||undefined, frequency_penalty: p.frequency_penalty||undefined, min_p: p.min_p||undefined, num_ctx: p.num_ctx };
+  if (tools.length) out.tools = tools;
+  return out;
+}
+
+// ─── Translation: OpenAI → Anthropic (non-streaming) ─────────────────────────
+function toAnthropic(oai, model) {
+  const choice = oai.choices?.[0], msg = choice?.message||{};
+  const content = [];
+  if (msg.content) content.push({ type:'text', text:msg.content });
+  for (const tc of msg.tool_calls||[]) content.push({ type:'tool_use', id:tc.id, name:tc.function.name, input:(()=>{try{return JSON.parse(tc.function.arguments);}catch{return{};}})() });
+  const stopMap = { stop:'end_turn', tool_calls:'tool_use', length:'max_tokens' };
+  return { id:oai.id||`msg_local_${Date.now()}`, type:'message', role:'assistant', content, model, stop_reason:stopMap[choice?.finish_reason]||'end_turn', stop_sequence:null, usage:{ input_tokens:oai.usage?.prompt_tokens||0, output_tokens:oai.usage?.completion_tokens||0 } };
+}
+
+// ─── Streaming: OpenAI SSE → Anthropic SSE ────────────────────────────────────
+function pipeLocalStream(src, res, model) {
+  const msgId = `msg_local_${Date.now()}`;
+  let buf='', started=false, blockIdx=0, textOpen=false, toolOpen=false, toolI=null;
+  const tools={};
+  const send=(ev,data)=>res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
+  const ensureStarted=()=>{ if(started)return; started=true; send('message_start',{type:'message_start',message:{id:msgId,type:'message',role:'assistant',content:[],model,stop_reason:null,stop_sequence:null,usage:{input_tokens:0,output_tokens:0}}}); send('ping',{type:'ping'}); };
+  const openText=()=>{ if(textOpen)return; if(toolOpen){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;toolOpen=false;toolI=null;} textOpen=true; send('content_block_start',{type:'content_block_start',index:blockIdx,content_block:{type:'text',text:''}}); };
+  const openTool=(i,tid,name)=>{ if(toolOpen&&toolI===i)return; if(textOpen){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;textOpen=false;} if(toolOpen&&toolI!==i){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;} toolOpen=true;toolI=i; send('content_block_start',{type:'content_block_start',index:blockIdx,content_block:{type:'tool_use',id:tid,name,input:{}}}); };
+  src.on('data', chunk=>{ buf+=chunk.toString(); const lines=buf.split('\n'); buf=lines.pop(); for(const line of lines){ if(!line.startsWith('data: '))continue; const raw=line.slice(6).trim(); if(raw==='[DONE]')continue; let p;try{p=JSON.parse(raw);}catch{continue;} const d=p.choices?.[0]?.delta,fin=p.choices?.[0]?.finish_reason; if(!d&&!fin)continue; ensureStarted(); if(d?.content){openText();send('content_block_delta',{type:'content_block_delta',index:blockIdx,delta:{type:'text_delta',text:d.content}});} if(d?.tool_calls){for(const tc of d.tool_calls){const i=tc.index??0;if(!tools[i])tools[i]={id:tc.id||`toolu_${Date.now()}_${i}`,name:tc.function?.name||''};if(tc.id)tools[i].id=tc.id;if(tc.function?.name)tools[i].name=tc.function.name;openTool(i,tools[i].id,tools[i].name);if(tc.function?.arguments)send('content_block_delta',{type:'content_block_delta',index:blockIdx,delta:{type:'input_json_delta',partial_json:tc.function.arguments}});}} if(fin){if(textOpen||toolOpen)send('content_block_stop',{type:'content_block_stop',index:blockIdx});ensureStarted();const stopMap={stop:'end_turn',tool_calls:'tool_use',length:'max_tokens'};send('message_delta',{type:'message_delta',delta:{stop_reason:stopMap[fin]||'end_turn',stop_sequence:null},usage:{output_tokens:0}});send('message_stop',{type:'message_stop'});} } });
+  src.on('end',()=>res.end()); src.on('error',()=>res.end());
+}
+
+// ─── Proxies ──────────────────────────────────────────────────────────────────
+function isCloudLimitResponse(statusCode, bodyText) {
+  if (statusCode === 429) return true;
+  const t = String(bodyText || '').toLowerCase();
+  return (
+    t.includes("you've hit your limit") ||
+    t.includes("you have hit your limit") ||
+    t.includes("rate limit") ||
+    t.includes("exceeded your current quota") ||
+    t.includes("insufficient credits")
+  );
+}
+
+function ollamaUnreachableMayUseCloud() {
+  return normalizeRoutingMode(CFG.routing.mode) !== 'local';
+}
+
+function proxyCloud(incoming, rawBody, body, res, fallback=false) {
+  if (fallback) routeTo('cloud', 'Ollama unreachable', true);
+  const streaming=!!body.stream;
+  const opts={hostname:CFG.cloud.host,port:CFG.cloud.port,path:incoming.url,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(rawBody),...(incoming.headers['x-api-key']&&{'x-api-key':incoming.headers['x-api-key']}),...(incoming.headers['authorization']&&{'authorization':incoming.headers['authorization']}),...(incoming.headers['anthropic-version']&&{'anthropic-version':incoming.headers['anthropic-version']}),...(incoming.headers['anthropic-beta']&&{'anthropic-beta':incoming.headers['anthropic-beta']})}};
+  const req=https.request(opts,upstream=>{
+    const canFallbackLocal = !fallback && normalizeRoutingMode(CFG.routing.mode) !== 'cloud';
+    if(streaming){
+      if(upstream.statusCode >= 400){
+        const chunks=[];
+        upstream.on('data',c=>chunks.push(c));
+        upstream.on('end',()=>{
+          const bodyBuf=Buffer.concat(chunks);
+          const bodyTxt=bodyBuf.toString();
+          if(canFallbackLocal && isCloudLimitResponse(upstream.statusCode, bodyTxt)){
+            routeTo('local', 'cloud limit detected, fallback to local', true);
+            return proxyLocal(incoming, body, res, rawBody);
+          }
+          res.writeHead(upstream.statusCode,{'Content-Type':'application/json'});
+          res.end(bodyBuf);
+        });
+        return;
+      }
+      res.writeHead(upstream.statusCode,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});
+      upstream.pipe(res);
+      return;
+    }
+
+    const chunks=[];
+    upstream.on('data',c=>chunks.push(c));
+    upstream.on('end',()=>{
+      const bodyBuf=Buffer.concat(chunks);
+      const bodyTxt=bodyBuf.toString();
+      if(canFallbackLocal && isCloudLimitResponse(upstream.statusCode, bodyTxt)){
+        routeTo('local', 'cloud limit detected, fallback to local', true);
+        return proxyLocal(incoming, body, res, rawBody);
+      }
+      res.writeHead(upstream.statusCode,{'Content-Type':'application/json'});
+      res.end(bodyBuf);
+    });
+  });
+  req.on('error',()=>{ if(!res.headersSent)res.writeHead(502).end(JSON.stringify({error:'cloud error'})); });
+  req.write(rawBody); req.end();
+}
+function proxyLocal(incoming, body, res, rawBody, routeSummary) {
+  const streaming = !!body.stream;
+  const anthropicModel = body.model || 'unknown';
+  (async () => {
+    let chosen = CFG.local.model;
+    let pickReason = 'default model';
+    try {
+      const tagsBody = await ollamaGet('/api/tags');
+      const tagList = normalizeOllamaTagList(tagsBody).map((m) => m.name);
+      const pool = resolveLocalPool(CFG, tagList);
+      if (!pool.length) {
+        chosen = CFG.local.model;
+        pickReason = 'empty pool (fallback)';
+      } else if (pool.length === 1) {
+        chosen = pool[0];
+        pickReason = 'only one model in pool';
+      } else if (!CFG.local.smart_routing) {
+        chosen = pool.includes(CFG.local.model) ? CFG.local.model : pool[0];
+        pickReason = 'smart routing off';
+      } else {
+        await ensureProfilesForModels(pool);
+        let profiles = pool.map((n) => profileCache.map.get(n)).filter(Boolean);
+        if (!profiles.length) {
+          profiles = pool.map((name) => buildModelProfile(name, null));
+        }
+        const task = analyzeLocalTask(body);
+        const effCtx = effectiveParamsFor(CFG.local.model).num_ctx;
+        const pick = pickBestLocalModel(profiles, task, CFG.local.model, effCtx, CFG.local.fast_model);
+        chosen = pick.model;
+        pickReason = pick.reason;
+      }
+      const p = effectiveParamsFor(chosen);
+      const openaiBody = JSON.stringify(buildOpenAI(body, p, chosen));
+      routeTo('local', `${routeSummary.reason} · ${chosen} — ${pickReason}`, false, { local_model: chosen });
+      const opts = { hostname: CFG.local.host, port: CFG.local.port, path: '/v1/chat/completions', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(openaiBody), authorization: 'Bearer ollama' } };
+      const req = http.request(opts, (upstream) => {
+        if (upstream.statusCode !== 200) {
+          if (ollamaUnreachableMayUseCloud()) return proxyCloud(incoming, rawBody, body, res, true);
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Ollama error (Ollama-only mode: no cloud fallback)' }));
+          }
+          return;
+        }
+        if (streaming) {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+          pipeLocalStream(upstream, res, anthropicModel);
+        } else {
+          const chunks = [];
+          upstream.on('data', (c) => chunks.push(c));
+          upstream.on('end', () => {
+            try {
+              const oai = JSON.parse(Buffer.concat(chunks).toString());
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(toAnthropic(oai, anthropicModel)));
+            } catch {
+              if (ollamaUnreachableMayUseCloud()) proxyCloud(incoming, rawBody, body, res, true);
+              else if (!res.headersSent) {
+                res.writeHead(502, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Bad response from Ollama (Ollama-only mode)' }));
+              }
+            }
+          });
+        }
+      });
+      req.on('error', () => {
+        if (ollamaUnreachableMayUseCloud()) proxyCloud(incoming, rawBody, body, res, true);
+        else if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Ollama unreachable (Ollama-only mode)' }));
+        }
+      });
+      req.write(openaiBody);
+      req.end();
+    } catch {
+      if (ollamaUnreachableMayUseCloud()) proxyCloud(incoming, rawBody, body, res, true);
+      else if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Ollama unreachable (Ollama-only mode)' }));
+      }
+    }
+  })();
+}
+
+function readBody(req) {
+  return new Promise((resolve,reject)=>{ const chunks=[]; req.on('data',c=>chunks.push(c)); req.on('end',()=>resolve(Buffer.concat(chunks))); req.on('error',reject); });
+}
+
+// ─── Dashboard HTML ───────────────────────────────────────────────────────────
+function paramSlider(key, label, desc, min, max, step, val) {
+  return `<div class="param-item" data-param="${key}"><div class="param-label"><span class="param-label-text">${label}</span><span class="param-default-pill built-in" id="pill-${key}">Default</span><span class="param-val" id="v-${key}">${val}</span></div><input type="range" id="p-${key}" min="${min}" max="${max}" step="${step}" value="${val}"><div class="param-desc">${desc}</div></div>`;
+}
+function paramNumber(key, label, desc, min, max, val) {
+  return `<div class="param-item" data-param="${key}"><div class="param-label"><span class="param-label-text">${label}</span><span class="param-default-pill built-in" id="pill-${key}">Default</span></div><input type="number" class="param-num" id="p-${key}" min="${min}" max="${max}" value="${val}"><div class="param-desc">${desc}</div></div>`;
+}
+
+/** JSON.stringify output safe for embedding in an inline HTML script (avoids closing the script tag on U+003C in data). */
+function jsonForInlineScript(value) {
+  return JSON.stringify(value).replace(/</g, '\\u003c');
+}
+
+function dashboardHTML(cfg) {
+  const p = effectiveParamsFor(cfg.local.model);
+  const routingModeInitial = normalizeRoutingMode(cfg.routing && cfg.routing.mode);
+  const routingModeLabel =
+    routingModeInitial === 'cloud' ? 'Claude only' : routingModeInitial === 'local' ? 'Ollama only' : 'Hybrid';
+  return `<!DOCTYPE html>
+<html lang="en" class="dark hybrid-dashboard">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Hybrid Router</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
+<link rel="stylesheet" href="/assets/dashboard-extra.css">
+<link rel="stylesheet" href="/assets/ollama-dashboard-model-card.css">
+<style>
+:root{
+  --dash-max-w:min(1280px,calc(100vw - 28px));
+  --hdr-anchor-offset:min(132px,28vh);
+  --dash-section-gap:16px;
+  --dash-card-pad:14px 16px;
+  --dash-card-radius:12px;
+  --dash-inline-pad:clamp(14px,2.5vw,20px);
+  --bg:#0d0d0d;--surface:#161616;--surface2:#1e1e1e;--border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.12);
+  --text:#e2e2e2;--text2:#999;--text3:#555;--accent:#3b82f6;--green:#22c55e;--blue:#60a5fa;--amber:#f59e0b;
+  --header-bg:rgba(10,10,10,.85);--header-border:rgba(255,255,255,.06);
+  --chip-bg:rgba(255,255,255,.05);--chip-border:rgba(255,255,255,.09);
+  --meta-bg:rgba(255,255,255,.03);--meta-border:rgba(255,255,255,.07);
+  --res-bg:rgba(255,255,255,.02);--res-border:rgba(255,255,255,.05);
+  --btn-bg:rgba(255,255,255,.07);--btn-border:rgba(255,255,255,.1);--btn-text:#ccc;
+  --tile-bg:rgba(255,255,255,.03);--tile-border:rgba(255,255,255,.06);
+  --toggle-bg:rgba(255,255,255,.06);--toggle-border:rgba(255,255,255,.1);--toggle-fg:#bbb;
+}
+html.light{
+  --bg:#f0f0f0;--surface:#ffffff;--surface2:#f5f5f5;--border:rgba(0,0,0,.1);--border2:rgba(0,0,0,.15);
+  --text:#1a1a1a;--text2:#555;--text3:#999;
+  --header-bg:rgba(240,240,240,.92);--header-border:rgba(0,0,0,.08);
+  --chip-bg:rgba(0,0,0,.05);--chip-border:rgba(0,0,0,.1);
+  --meta-bg:rgba(0,0,0,.03);--meta-border:rgba(0,0,0,.08);
+  --res-bg:rgba(0,0,0,.02);--res-border:rgba(0,0,0,.07);
+  --btn-bg:rgba(0,0,0,.06);--btn-border:rgba(0,0,0,.12);--btn-text:#444;
+  --tile-bg:rgba(0,0,0,.03);--tile-border:rgba(0,0,0,.07);
+  --toggle-bg:rgba(0,0,0,.06);--toggle-border:rgba(0,0,0,.12);--toggle-fg:#444;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.45;padding-top:0;padding-bottom:200px}
+a{color:inherit}
+
+/* ── Header ──────────────────────────────────────────────────────── */
+.hdr{position:sticky;top:0;z-index:100;background:var(--header-bg);border-bottom:1px solid var(--header-border);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);padding:0}
+.hdr-inner{max-width:var(--dash-max-w);margin:0 auto;padding:.45rem var(--dash-inline-pad) .35rem}
+.hdr-bar{display:flex;align-items:center;gap:.65rem;flex-wrap:wrap;position:relative;padding-right:2.6rem}
+.hdr-system{padding:0 0 .5rem}
+.hdr-left{display:flex;align-items:center;gap:.4rem;flex:1 1 auto}
+.hdr-logos{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+.hdr-logo{
+  width:24px;
+  height:24px;
+  border-radius:50%;
+  background:#fff;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  flex-shrink:0;
+  overflow:hidden;
+}
+.hdr-logo img{
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  display:block;
+}
+.health-badge{display:inline-flex;align-items:center;gap:.3rem;padding:.2rem .55rem;border-radius:20px;font-size:11.5px;font-weight:600;white-space:nowrap;border:1px solid transparent;transition:all .3s}
+.health-badge.healthy{background:rgba(34,197,94,.12);color:#4ade80;border-color:rgba(34,197,94,.25)}
+.health-badge.degraded{background:rgba(234,179,8,.12);color:#facc15;border-color:rgba(234,179,8,.25)}
+.health-badge.unhealthy{background:rgba(239,68,68,.12);color:#f87171;border-color:rgba(239,68,68,.25)}
+.health-dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
+.svc-btns{display:flex;gap:.25rem;align-items:center}
+.svc-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;border:1px solid var(--btn-border);background:var(--btn-bg);color:var(--btn-text);cursor:pointer;font-size:11px;transition:all .15s}
+.svc-btn:hover:not(:disabled){filter:brightness(1.3)}
+.svc-btn:disabled{opacity:.35;cursor:not-allowed}
+.svc-btn.start{color:#4ade80;border-color:rgba(34,197,94,.3)}
+.svc-btn.stop{color:#f87171;border-color:rgba(239,68,68,.3)}
+.svc-btn.restart{color:#facc15;border-color:rgba(234,179,8,.3)}
+.hdr-brand{font-size:12px;font-weight:700;color:var(--text);letter-spacing:-.02em;margin-left:2px;white-space:nowrap}
+@media(max-width:480px){.hdr-brand{display:none}}
+.routing-mode-btn{
+  font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer;white-space:nowrap;flex-shrink:0;
+  transition:filter .15s,transform .1s;
+}
+.routing-mode-btn:hover{filter:brightness(1.12)}
+.routing-mode-btn:active{transform:scale(.97)}
+.routing-mode--hybrid{background:rgba(245,158,11,.22);color:#fbbf24;border-color:rgba(245,158,11,.5);box-shadow:0 0 0 1px rgba(245,158,11,.12)}
+.routing-mode--cloud{background:rgba(167,139,250,.22);color:#c4b5fd;border-color:rgba(167,139,250,.55);box-shadow:0 0 0 1px rgba(167,139,250,.12)}
+.routing-mode--local{background:rgba(34,197,94,.2);color:#4ade80;border-color:rgba(34,197,94,.5);box-shadow:0 0 0 1px rgba(34,197,94,.1)}
+html.light .routing-mode--hybrid{color:#b45309;border-color:rgba(217,119,6,.45);background:rgba(251,191,36,.25)}
+html.light .routing-mode--cloud{color:#5b21b6;border-color:rgba(124,58,237,.4);background:rgba(196,181,253,.35)}
+html.light .routing-mode--local{color:#15803d;border-color:rgba(22,163,74,.45);background:rgba(134,239,172,.35)}
+/* meta panel */
+.hdr-meta{display:flex;flex-direction:column;align-items:flex-end;gap:.18rem;background:var(--meta-bg);border:1px solid var(--meta-border);border-radius:.4rem;padding:.2rem .5rem}
+.chips{display:flex;flex-wrap:wrap;gap:.2rem;justify-content:flex-end}
+.chip{display:inline-flex;align-items:center;padding:.1rem .4rem;border-radius:.3rem;font-size:.72rem;font-weight:500;background:var(--chip-bg);border:1px solid var(--chip-border);color:var(--text2);white-space:nowrap}
+.chip.mono{font-family:ui-monospace,'Cascadia Code','Segoe UI Mono',monospace;font-size:.7rem;color:#93c5fd}
+.last-route-bar{margin-top:.28rem;font-size:.72rem;color:var(--text2);max-width:32rem;text-align:right;line-height:1.4}
+.last-route-bar .lr-dest{font-weight:700;color:var(--green)}
+.last-route-bar.cloud .lr-dest{color:var(--blue)}
+.last-route-bar.fallback .lr-dest{color:var(--amber)}
+.refresh-row{display:flex;align-items:center;gap:.3rem;font-size:.7rem;color:var(--text3)}
+.rdot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;flex-shrink:0}
+.rdot.err{background:#ef4444;animation:none}
+.rbtn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:4px;border:1px solid var(--btn-border);background:var(--btn-bg);color:var(--text2);cursor:pointer;font-size:9px;transition:all .15s}
+.rbtn:hover{filter:brightness(1.3)}
+/* theme toggle */
+.theme-btn{position:absolute;right:0;top:50%;transform:translateY(-50%);width:2rem;height:2rem;border-radius:.5rem;border:1px solid var(--toggle-border);background:var(--toggle-bg);color:var(--toggle-fg);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.9rem;transition:all .2s;flex-shrink:0}
+.theme-btn:hover{filter:brightness(1.2)}
+html.dark .sun{display:none} html.dark .moon{display:inline}
+html.light .sun{display:inline} html.light .moon{display:none}
+/* system load (lives in sticky header; does not scroll with .main) */
+.res-strip{margin:0;background:transparent;border:none;padding:0}
+.res-strip--hdr{margin-top:.4rem;padding-top:.5rem;border-top:1px solid var(--header-border)}
+.res-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.res-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3)}
+.res-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+@media(max-width:560px){.res-grid{grid-template-columns:repeat(2,1fr)}}
+.res-metric{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 9px}
+.res-row{display:flex;justify-content:space-between;align-items:center}
+.res-label{font-size:.65rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em}
+.res-val{font-size:.78rem;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+canvas.spark{width:100%;height:10px;border-radius:2px;display:block;margin-top:.08rem}
+
+/* ── Main content ─────────────────────────────────────────────────── */
+.main{
+  padding:14px var(--dash-inline-pad) 32px;
+  max-width:var(--dash-max-w);
+  margin:0 auto;
+  display:flex;
+  flex-direction:column;
+  gap:var(--dash-section-gap);
+}
+h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--text3)}
+
+/* Dashboard layout (compact sections) */
+.dash-card{
+  background:var(--tile-bg);
+  border:1px solid var(--tile-border);
+  border-radius:var(--dash-card-radius);
+  padding:var(--dash-card-pad);
+  margin:0;
+}
+.dash-section-title{
+  font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);
+  margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border);
+}
+.dash-subsection-title{
+  font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--text2);
+  margin:12px 0 6px;
+}
+.dash-subsection-title:first-of-type{margin-top:4px}
+.dash-card--models-runtime{padding:13px 16px}
+.models-toolbar-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;margin-bottom:6px}
+.models-toolbar-default{display:flex;flex-direction:column;gap:3px;flex:1 1 min(100%,16rem);min-width:min(100%,12rem)}
+.models-toolbar-default .local-model-lbl{margin:0}
+.models-smart-cb{display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+.routing-saved-msg{margin-left:auto;flex-shrink:0;align-self:center;margin-bottom:2px}
+.models-fast-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--border)}
+.models-toolbar-fast{display:flex;flex-direction:column;gap:3px;flex:1 1 min(100%,18rem);min-width:min(100%,12rem)}
+.models-toolbar-fast .local-model-lbl{margin:0}
+.models-fast-hint{margin:0;font-size:10px;color:var(--text3);line-height:1.45;flex:1 1 14rem;max-width:44rem;align-self:flex-end;padding-bottom:2px}
+.dash-card--models-runtime .local-pool-panel{
+  position:relative;margin-top:10px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;max-width:100%;
+}
+.local-pool-panel--compact{padding:10px 12px !important}
+.pool-panel-block{margin-bottom:0}
+.pool-explainer{font-size:11px;color:var(--text3);line-height:1.5;margin:6px 0 8px;max-width:52rem}
+.pool-hint-line{margin:0 !important;font-size:10px !important;color:var(--text2);font-weight:600}
+.pool-chips-grid{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0;padding:4px 0 2px}
+.pool-chip{
+  display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+  padding:6px 11px;border-radius:999px;border:1px solid var(--border);
+  background:var(--surface2);transition:background .15s,border-color .15s,box-shadow .15s;
+  font-size:11px;user-select:none;
+}
+.pool-chip:hover{border-color:color-mix(in srgb,var(--border) 70%,var(--accent) 30%)}
+.pool-chip.pool-chip--on{
+  border-color:rgba(59,130,246,.55);
+  background:color-mix(in srgb,var(--accent) 14%,var(--surface2));
+  box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 25%,transparent);
+}
+.pool-chip input[type=checkbox]{width:14px;height:14px;margin:0;accent-color:var(--accent);cursor:pointer;flex-shrink:0}
+.pool-chip-name{font-family:ui-monospace,'Cascadia Code',Consolas,monospace;font-size:10.5px;font-weight:600;color:var(--text);max-width:min(100%,22rem);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pool-chip-size{font-size:9px;font-weight:600;color:var(--text3);font-variant-numeric:tabular-nums;flex-shrink:0}
+.pool-select-hidden{
+  position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;
+  overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important;
+}
+.dash-callout{
+  font-size:12px;line-height:1.55;color:var(--text2);background:color-mix(in srgb,var(--accent) 8%,var(--tile-bg));
+  border:1px solid color-mix(in srgb,var(--accent) 28%,var(--border));border-radius:var(--dash-card-radius);padding:12px 16px;margin:0;max-width:62rem;
+}
+.dash-callout strong{color:var(--text)}
+.dash-callout .inline-code,.params-sub .inline-code{font-family:ui-monospace,Consolas,monospace;font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
+.dash-supporter-footer{
+  margin:0;padding:12px 16px;border:1px solid var(--tile-border);background:color-mix(in srgb,var(--tile-bg) 92%,transparent);border-radius:var(--dash-card-radius);
+  display:flex;justify-content:center;text-align:center;
+}
+.dash-supporter-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px;min-width:0;max-width:100%}
+.dash-supporter-text{font-size:11px;color:var(--text2);margin:0;line-height:1.2;text-align:center;flex:0 1 auto;max-width:100%}
+.dash-bmc-link{display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;font-size:10.5px;font-weight:600;color:#0c4a6e;background:#d6ecfc;padding:4px 10px;border-radius:999px;text-decoration:none;border:1px solid color-mix(in srgb,#93c5fd 45%,#0c4a6e 18%);transition:filter .15s,transform .15s,background .15s;line-height:1.2;white-space:nowrap}
+.dash-bmc-link:hover{filter:brightness(1.04);background:#c5e3fa;transform:translateY(-1px)}
+.dash-bmc-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+html.light .dash-bmc-link{color:#0c4a6e}
+.vram-empty-note{font-size:9px;color:var(--text3);margin-top:6px;line-height:1.35;max-width:44rem;opacity:.9}
+.settings-hint-details{margin-bottom:12px;border:1px solid var(--border);border-radius:8px;padding:8px 12px;background:var(--surface2)}
+.settings-hint-details summary{cursor:pointer;font-size:11px;font-weight:600;color:var(--text2);user-select:none}
+.settings-hint-details .settings-hint-body{margin:8px 0 0;font-size:10px;color:var(--text3);line-height:1.45;max-width:48rem}
+.info-readonly-note{font-size:11px;color:var(--text3);margin:0 0 12px;line-height:1.45;max-width:42rem}
+.dash-card--params .params-panel{
+  margin:4px 0 0;padding:12px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;
+}
+.dash-card--params .params-sub{margin-top:0;margin-bottom:8px}
+.dash-card--params>.dash-section-title{border-bottom:none;padding-bottom:0;margin-bottom:10px}
+
+/* Model card layout: ollama-dashboard (see /assets/ollama-dashboard-model-card.css) */
+.local-model-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 6px}
+.local-model-lbl{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em}
+.local-model-select{min-width:min(100%,22rem);max-width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px}
+.local-pool-panel .local-model-lbl{display:flex;align-items:center;gap:8px;cursor:pointer}
+
+/* ── Params panel ───────────────────────────────────────────────────── */
+.params-panel{background:var(--tile-bg);border:1px solid var(--tile-border);border-radius:var(--dash-card-radius);padding:12px 14px;margin-bottom:0}
+.params-sub{font-size:10px;color:var(--text3);margin:0 0 8px;line-height:1.45;max-width:52rem}
+.params-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 12px}
+.params-files-textarea{width:100%;min-height:min(50vh,420px);font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.4;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);resize:vertical;box-sizing:border-box}
+.params-files-path{font-size:10px;color:var(--text3);margin:6px 0}
+.params-files-err{font-size:11px;color:#f87171;margin:8px 0}
+.params-files-tabs{display:flex;gap:4px;margin:10px 0 6px;flex-wrap:wrap}
+.params-files-tabs .params-file-tab{font-size:10px;font-weight:600;padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);cursor:pointer}
+.params-files-tabs .params-file-tab[aria-selected="true"]{border-color:var(--accent);color:var(--text);background:color-mix(in srgb,var(--accent) 12%,var(--surface2))}
+.pbtn-secondary{background:var(--btn-bg);color:var(--btn-text);border:1px solid var(--btn-border)}.pbtn-secondary:hover{filter:brightness(1.15)}
+.params-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:10px;flex-wrap:wrap}
+.params-hdr-label{font-size:11px;font-weight:600;color:var(--text2);letter-spacing:.04em;text-transform:uppercase}
+.pact{display:flex;gap:7px;align-items:center}
+.pbtn{font-size:11.5px;font-weight:600;padding:5px 13px;border-radius:6px;border:none;cursor:pointer;transition:all .15s}
+.pbtn-save{background:#1d4ed8;color:#fff}.pbtn-save:hover{background:#2563eb}
+.pbtn-reset{background:var(--btn-bg);color:var(--btn-text);border:1px solid var(--btn-border)}.pbtn-reset:hover{filter:brightness(1.2)}
+.params-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+@media(max-width:660px){.params-grid{grid-template-columns:repeat(2,1fr)}}
+.param-item{display:flex;flex-direction:column;gap:4px;border-radius:8px;padding:6px 8px;margin:-4px -6px;transition:background .2s,border-color .2s}
+.param-item.param--override{background:rgba(245,158,11,.07);border-left:3px solid var(--amber);padding-left:11px;margin-left:-11px;border-radius:0 8px 8px 0}
+html.light .param-item.param--override{background:rgba(245,158,11,.1)}
+.param-label{font-size:10.5px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;display:flex;align-items:center;flex-wrap:wrap;gap:6px;width:100%}
+.param-label-text{flex:0 1 auto}
+.param-default-pill{font-size:7.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;padding:2px 6px;border-radius:4px;line-height:1}
+.param-default-pill.built-in{background:var(--chip-bg);color:var(--text3);border:1px solid var(--chip-border)}
+.param-default-pill.custom{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.4)}
+.param-val{color:var(--accent);font-weight:700;min-width:34px;text-align:right;margin-left:auto}
+.param-desc{font-size:9.5px;color:var(--text3);margin-top:1px;line-height:1.4}
+input[type=range]{width:100%;accent-color:#3b82f6;min-height:22px;padding:5px 0;box-sizing:border-box;cursor:pointer}
+input[type=number].param-num{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:4px 7px;font-size:12px}
+input[type=number].param-num:focus{outline:none;border-color:var(--accent)}
+.adv-toggle{font-size:10px;color:var(--text3);cursor:pointer;text-decoration:underline;text-underline-offset:2px;margin-top:10px;display:inline-block}
+.adv-toggle:hover{color:var(--text2)}
+.params-adv{margin-top:8px;display:none}
+.params-adv.open{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.saved-msg{font-size:11px;color:var(--green);opacity:0;transition:opacity .4s}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2000;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}
+.modal-overlay[hidden]{display:none !important}
+.modal-box{background:var(--surface2);border:1px solid var(--border2);border-radius:12px;max-width:min(920px,96vw);max-height:82vh;display:flex;flex-direction:column;box-shadow:0 24px 56px rgba(0,0,0,.45)}
+.modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:11px 16px;border-bottom:1px solid var(--border);font-weight:600;font-size:13px;color:var(--text)}
+.modal-x{background:none;border:none;color:var(--text2);cursor:pointer;font-size:22px;line-height:1;padding:2px 8px;border-radius:6px}
+.modal-x:hover{background:var(--chip-bg);color:var(--text)}
+.modal-body{padding:12px 16px 16px;overflow:auto;flex:1;min-height:120px}
+.modal-body pre{margin:0;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,'Cascadia Code',Consolas,monospace;color:var(--text2)}
+
+/* ── Routing log ──────────────────────────────────────────────────── */
+.stats{display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.stat{background:var(--tile-bg);border:1px solid var(--tile-border);border-radius:8px;padding:9px 16px;text-align:center;min-width:82px}
+.stat-val{font-size:24px;font-weight:700;line-height:1}
+.stat-lbl{font-size:9.5px;color:var(--text3);margin-top:3px;text-transform:uppercase;letter-spacing:.05em}
+.lv{color:var(--green)}.cv{color:var(--blue)}.tv{color:#a78bfa}
+#log{display:flex;flex-direction:column;gap:5px}
+.entry{display:flex;align-items:center;gap:9px;background:var(--tile-bg);border:1px solid var(--tile-border);border-radius:6px;padding:7px 11px;animation:fadeIn .18s ease}
+.entry.local{border-left:3px solid var(--green)}.entry.cloud{border-left:3px solid var(--blue)}.entry.fallback{border-left:3px solid var(--amber)}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.badge{font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;min-width:46px;text-align:center}
+.badge.local{background:#14532d;color:#4ade80}.badge.cloud{background:#1e3a5f;color:#93c5fd}.badge.fallback{background:#451a03;color:#fbbf24}
+.etime{font-size:10.5px;color:var(--text3);min-width:56px;font-variant-numeric:tabular-nums}
+.reason{font-size:12px;color:var(--text2);flex:1}
+.empty{color:var(--text3);font-size:12px;padding:30px;text-align:center}
+.thresholds{font-size:10.5px;color:var(--text3);margin-bottom:13px}
+.thresholds span{color:var(--text2);margin-right:12px}
+hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
+
+/* ── Fixed footer output window ───────────────────────────────────────────── */
+.fixed-log-footer{
+  position:fixed;
+  left:0; right:0; bottom:0;
+  z-index:999;
+  height:260px;
+  min-height:130px;
+  max-height:70vh;
+  display:flex;
+  flex-direction:column;
+  pointer-events:auto;
+  box-shadow:0 -10px 30px rgba(0,0,0,.28);
+}
+.fixed-log-resizer{
+  height:12px;
+  cursor:ns-resize;
+  border-top:1px solid var(--border);
+  border-left:1px solid var(--border);
+  border-right:1px solid var(--border);
+  border-radius:12px 12px 0 0;
+  background:var(--chip-bg);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  user-select:none;
+  touch-action:none;
+}
+.fixed-log-resizer::before{
+  content:"";
+  width:42px;
+  height:3px;
+  border-radius:999px;
+  background:var(--text3);
+}
+.fixed-log-panel{
+  display:flex;
+  flex-direction:column;
+  height:100%;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:12px 12px 0 0;
+  overflow:hidden;
+}
+.fixed-log-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  padding:8px 12px;
+  border-bottom:1px solid var(--border);
+  background:var(--chip-bg);
+}
+.fixed-log-title{
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  color:var(--text2);
+}
+.fixed-log-title .fixed-log-count{
+  font-weight:500;
+  letter-spacing:normal;
+  text-transform:none;
+  color:var(--text3);
+}
+.fixed-log-tools{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+}
+.fixed-log-toggle{
+  border:1px solid var(--btn-border);
+  background:var(--btn-bg);
+  color:var(--btn-text);
+  border-radius:6px;
+  font-size:10.5px;
+  line-height:1;
+  padding:4px 8px;
+  cursor:pointer;
+}
+.fixed-log-output{
+  flex:1 1 auto;
+  overflow:auto;
+  padding:8px 12px;
+  font-family:ui-monospace,"Cascadia Code","Consolas",monospace;
+  font-size:11.5px;
+  line-height:1.45;
+  background:var(--surface2);
+}
+.fixed-log-line{
+  padding:2px 0;
+  border-bottom:1px dashed rgba(255,255,255,.08);
+}
+.fixed-log-line:last-child{border-bottom:none}
+.fixed-log-line .local{color:#4ade80}
+.fixed-log-line .cloud{color:#93c5fd}
+.fixed-log-line .fallback{color:#fbbf24}
+.fixed-log-footer.is-collapsed{
+  height:46px !important;
+  min-height:46px !important;
+}
+.fixed-log-footer.is-collapsed .fixed-log-resizer{display:none}
+.fixed-log-footer.is-collapsed .fixed-log-head{border-bottom:none}
+.fixed-log-footer.is-collapsed .fixed-log-output{display:none}
+</style>
+</head>
+<body data-poll-interval="10">
+
+<!-- ══ Header ═══════════════════════════════════════════════════════════════ -->
+<header class="hdr">
+  <div class="hdr-inner">
+  <div class="hdr-bar">
+    <!-- Left: logo + health + service controls -->
+    <div class="hdr-left">
+      <span class="hdr-logos">
+        <span class="hdr-logo"><img src="/assets/ollama-logo.png" alt="Ollama"></span>
+        <span class="hdr-logo"><img src="/assets/claude-code-icon.svg" alt="Claude Code"></span>
+      </span>
+      <span class="hdr-brand">Claude Hybrid</span>
+      <button type="button" class="routing-mode-btn routing-mode--${routingModeInitial}" id="routing-mode-btn" title="Click to cycle: Hybrid → Claude only → Ollama only" aria-label="Routing mode: ${routingModeLabel.replace(/"/g, '&quot;')}">${routingModeLabel}</button>
+      <span class="health-badge degraded" id="health-badge">
+        <span class="health-dot"></span>
+        <span id="health-text">Checking...</span>
+      </span>
+      <div class="svc-btns">
+        <button class="svc-btn start" id="btn-start"  title="Start Ollama"   onclick="svcAction('start')"   disabled>&#9654;</button>
+        <button class="svc-btn stop"  id="btn-stop"   title="Stop Ollama"    onclick="svcAction('stop')"    disabled>&#9632;</button>
+        <button class="svc-btn restart" id="btn-restart" title="Restart Ollama" onclick="svcAction('restart')" disabled>&#10227;</button>
+      </div>
+    </div>
+    <!-- Right: meta panel -->
+    <div class="hdr-meta">
+      <div class="chips">
+        <span class="chip" id="chip-ollama">Ollama</span>
+        <span class="chip mono">localhost:11434</span>
+        <span class="chip mono">${String(cfg.listenHost).replace(/[<>&]/g, '')}:${cfg.port}</span>
+      </div>
+      <div class="last-route-bar local" id="last-route-bar"><span id="last-route-text"></span></div>
+      <div class="refresh-row">
+        <span class="rdot" id="rdot"></span>
+        <span>Updated <span id="last-update">—</span> &middot; next poll <span id="next-poll">10</span>s</span>
+        <button class="rbtn" onclick="void runCoalescedDashboardRefresh(true)" title="Refresh now (reloads metrics and generation sliders from server)">&#8635;</button>
+      </div>
+    </div>
+    <!-- Theme toggle -->
+    <button class="theme-btn" onclick="toggleTheme()" title="Toggle theme">
+      <span class="sun">&#9788;</span><span class="moon">&#9790;</span>
+    </button>
+  </div>
+  <div class="hdr-system" role="region" aria-labelledby="dash-sys-h">
+    <div class="res-strip res-strip--hdr">
+      <div class="res-head">
+        <span class="res-title" id="dash-sys-h">System load</span>
+      </div>
+      <div class="res-grid">
+        <div class="res-metric"><div class="res-row"><span class="res-label">CPU</span><span class="res-val" id="r-cpu">—%</span></div><canvas class="spark" id="spark-cpu"></canvas></div>
+        <div class="res-metric"><div class="res-row"><span class="res-label">RAM</span><span class="res-val" id="r-ram">—%</span></div><canvas class="spark" id="spark-ram"></canvas></div>
+        <div class="res-metric"><div class="res-row"><span class="res-label">VRAM</span><span class="res-val" id="r-vram">—%</span></div><canvas class="spark" id="spark-vram"></canvas></div>
+        <div class="res-metric"><div class="res-row"><span class="res-label">GPU</span><span class="res-val" id="r-gpu">—%</span></div><canvas class="spark" id="spark-gpu"></canvas></div>
+      </div>
+    </div>
+  </div>
+  </div>
+</header>
+<script>
+(function(){
+  function applyHealth(d){
+    var badge=document.getElementById('health-badge');
+    var text=document.getElementById('health-text');
+    var rdot=document.getElementById('rdot');
+    if(badge) badge.className='health-badge '+(d.status||'unhealthy');
+    if(d.status==='healthy'){
+      var m=Math.floor((d.uptime_seconds||0)/60), h=Math.floor(m/60);
+      if(text) text.textContent='Healthy'+(d.uptime_seconds?(' \u00b7 '+(h>0?h+'h '+m%60+'m':m+'m')):'');
+      if(rdot) rdot.className='rdot';
+    } else if(d.status==='degraded'){
+      if(text) text.textContent='Degraded \u00b7 Ollama not running';
+      if(rdot) rdot.className='rdot err';
+    } else {
+      if(text) text.textContent='Unhealthy'+(d.error?' \u00b7 '+d.error:'');
+      if(rdot) rdot.className='rdot err';
+    }
+    var running=d.status==='healthy';
+    var bs=document.getElementById('btn-start'), bt=document.getElementById('btn-stop'), br=document.getElementById('btn-restart');
+    if(bs) bs.disabled=running;
+    if(bt) bt.disabled=!running;
+    if(br) br.disabled=!running;
+  }
+  var ac=new AbortController();
+  var tid=setTimeout(function(){ try{ ac.abort(); }catch(_){} },8000);
+  fetch('/api/health',{signal:ac.signal}).then(function(r){
+    clearTimeout(tid);
+    if(!r.ok) throw new Error('http');
+    return r.json();
+  }).then(applyHealth).catch(function(e){
+    clearTimeout(tid);
+    var badge=document.getElementById('health-badge');
+    var text=document.getElementById('health-text');
+    var rdot=document.getElementById('rdot');
+    if(badge) badge.className='health-badge unhealthy';
+    if(text) text.textContent=(e&&e.name==='AbortError')?'Router not responding (timeout)':'Health check failed';
+    if(rdot) rdot.className='rdot err';
+  });
+  var acS=new AbortController();
+  var tidS=setTimeout(function(){ try{ acS.abort(); }catch(_){} },12000);
+  fetch('/api/system-stats',{signal:acS.signal}).then(function(r){
+    clearTimeout(tidS);
+    if(!r.ok)throw 0;
+    return r.json();
+  }).then(function(d){
+    function pct(el,v){
+      if(!el)return;
+      if(v==null||v===''){ el.textContent='—%'; return; }
+      var n=Number(v);
+      el.textContent=isFinite(n)?(Math.round(n)+'%'):'—%';
+    }
+    pct(document.getElementById('r-cpu'),d.cpu);
+    pct(document.getElementById('r-ram'),d.ram);
+    pct(document.getElementById('r-vram'),d.vram);
+    pct(document.getElementById('r-gpu'),d.gpu);
+  }).catch(function(){ clearTimeout(tidS); });
+  function bootModelsFromApi(){
+    setTimeout(function(){
+    fetch('/api/ollama-models').then(function(r){ if(!r.ok)throw 0; return r.json(); }).then(function(d){
+      return fetch('/api/router/local-routing-config').then(function(r2){ return r2.ok?r2.json():{}; }).then(function(cfg){
+      var cb=document.getElementById('smart-routing-cb');
+      if(cb) cb.checked=cfg.smart_routing!==false;
+      var fastCur=typeof cfg.fast_model==='string'?cfg.fast_model.trim():'';
+      var sel=document.getElementById('local-model-select');
+      if(sel){
+        var cur=String(d.configured_model||''), seen={};
+        sel.innerHTML='';
+        (d.models||[]).forEach(function(m){
+          if(!m||!m.name||seen[m.name])return;
+          seen[m.name]=1;
+          var o=document.createElement('option');
+          o.value=m.name;
+          o.textContent=m.name;
+          if(m.size!=null&&m.size>0){
+            var g=m.size/1e9;
+            o.textContent=m.name+' ('+(g>=1?g.toFixed(1)+' GB':Math.round(m.size/1e6)+' MB')+')';
+          }
+          if(m.name===cur) o.selected=true;
+          sel.appendChild(o);
+        });
+        if(cur&&!seen[cur]){
+          var ox=document.createElement('option');
+          ox.value=cur; ox.textContent=cur+' (configured, not in ollama list)'; ox.selected=true; sel.appendChild(ox);
+        }
+      }
+      var fs=document.getElementById('fast-model-select');
+      if(fs){
+        fs.innerHTML='';
+        var n0=document.createElement('option'); n0.value=''; n0.textContent='(None)'; fs.appendChild(n0);
+        var seenF={};
+        (d.models||[]).forEach(function(m){
+          if(!m||!m.name||seenF[m.name])return;
+          seenF[m.name]=1;
+          var o=document.createElement('option');
+          o.value=m.name; o.textContent=m.name;
+          if(m.size!=null&&m.size>0){ var g=m.size/1e9; o.textContent=m.name+' ('+(g>=1?g.toFixed(1)+' GB':Math.round(m.size/1e6)+' MB')+')'; }
+          fs.appendChild(o);
+        });
+        if(fastCur&&!seenF[fastCur]){
+          var of=document.createElement('option');
+          of.value=fastCur; of.textContent=fastCur+' (in config, not in ollama list)'; fs.appendChild(of);
+        }
+        try{ fs.value=fastCur; }catch(_){}
+      }
+      var poolRoot=document.getElementById('pool-chips-root');
+      var poolSel=document.getElementById('local-pool-select');
+      if(poolRoot&&poolSel){
+        var wantPool=new Set();
+        if(Array.isArray(cfg.models)){
+          cfg.models.forEach(function(x){ var s=String(x||'').trim(); if(s)wantPool.add(s); });
+        }
+        var restrictPool=wantPool.size>0;
+        poolRoot.innerHTML='';
+        poolSel.innerHTML='';
+        var seenP={}, listP=[];
+        (d.models||[]).forEach(function(m){
+          if(!m||!m.name||seenP[m.name])return;
+          seenP[m.name]=1;
+          listP.push(m);
+        });
+        function fmtPoolSz(n){
+          if(n==null||n==='')return '';
+          var x=Number(n);
+          if(!isFinite(x)||x<=0)return '';
+          var g=x/1e9;
+          return g>=1?g.toFixed(1)+' GB':Math.round(x/1e6)+' MB';
+        }
+        function syncPoolHiddenBoot(){
+          var byVal={};
+          poolRoot.querySelectorAll('.pool-chip input[type=checkbox]').forEach(function(cbx){ byVal[cbx.value]=cbx.checked; });
+          for(var i=0;i<poolSel.options.length;i++){ poolSel.options[i].selected=!!byVal[poolSel.options[i].value]; }
+        }
+        function poolHintBoot(){
+          var ph=document.getElementById('pool-hint');
+          if(!ph)return;
+          var n=poolRoot.querySelectorAll('.pool-chip').length;
+          var ch=poolRoot.querySelectorAll('input[type=checkbox]:checked').length;
+          if(n===0) ph.textContent='No models installed — run ollama pull';
+          else if(ch===0) ph.textContent=n+' model'+(n===1?'':'s')+' installed · full library allowed (check models to restrict the pool)';
+          else ph.textContent=n+' installed · pool limited to '+ch+' model'+(ch===1?'':'s');
+        }
+        listP.forEach(function(m){
+          var on=restrictPool&&wantPool.has(m.name);
+          var lbl=document.createElement('label');
+          lbl.className='pool-chip'+(on?' pool-chip--on':'');
+          var cbx=document.createElement('input');
+          cbx.type='checkbox';
+          cbx.value=m.name;
+          cbx.checked=on;
+          cbx.setAttribute('aria-label','Include '+m.name+' in local routing pool');
+          lbl.appendChild(cbx);
+          var spn=document.createElement('span');
+          spn.className='pool-chip-name';
+          spn.textContent=m.name;
+          spn.title=m.name;
+          lbl.appendChild(spn);
+          if(m.size!=null&&m.size>0){
+            var sz=document.createElement('span');
+            sz.className='pool-chip-size';
+            sz.textContent=fmtPoolSz(m.size);
+            lbl.appendChild(sz);
+          }
+          cbx.addEventListener('change',function(){
+            lbl.classList.toggle('pool-chip--on',cbx.checked);
+            syncPoolHiddenBoot();
+            poolHintBoot();
+          });
+          poolRoot.appendChild(lbl);
+          var popt=document.createElement('option');
+          popt.value=m.name;
+          popt.textContent=m.name;
+          popt.selected=on;
+          poolSel.appendChild(popt);
+        });
+        poolHintBoot();
+      }
+      });
+    }).catch(function(){});
+    },150);
+  }
+  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',bootModelsFromApi); }
+  else{ bootModelsFromApi(); }
+})();
+</script>
+
+<!-- ══ Main ═════════════════════════════════════════════════════════════════ -->
+<div class="main">
+
+  <div class="dash-callout" role="region" aria-label="Local-first routing">
+    <strong>Local-first, cloud when it matters.</strong>
+    Most work goes to your Ollama pool; smart routing picks a model per task. Very large prompts, heavy tool output this turn, or routing keywords still use Claude so quality stays high. Use <strong>Speed assist model</strong> below for a smaller tag on brief prompts (e.g. &ldquo;give a concise summary&rdquo;). Pool, smart routing, and speed assist save automatically when you change them.
+  </div>
+
+  <section class="dash-card dash-card--models-runtime" aria-labelledby="dash-models-h">
+    <h2 class="dash-section-title" id="dash-models-h">Models &amp; routing</h2>
+    <div class="models-toolbar-row">
+      <div class="models-toolbar-default">
+        <label class="local-model-lbl" for="local-model-select">Default model</label>
+        <select id="local-model-select" class="local-model-select" title="Primary model in hybrid.config.json; tie-breaker for smart routing"></select>
+      </div>
+      <label class="local-model-lbl models-smart-cb"><input type="checkbox" id="smart-routing-cb" checked> Smart routing</label>
+      <span class="saved-msg routing-saved-msg" id="pool-save-msg" style="opacity:0" aria-live="polite">\u2713 Saved</span>
+    </div>
+    <div class="models-fast-row">
+      <div class="models-toolbar-fast">
+        <label class="local-model-lbl" for="fast-model-select">Speed assist model</label>
+        <select id="fast-model-select" class="local-model-select" title="Optional smaller model (local.fast_model) boosted when the user asks for brief or quick answers. Saves automatically when changed.">
+          <option value="">(None)</option>
+        </select>
+      </div>
+      <p class="models-fast-hint">Smaller Ollama tag preferred for speed-style prompts. Leave (None) to disable. Same pool / smart routing rules apply.</p>
+    </div>
+    <div class="local-pool-panel local-pool-panel--compact" id="local-pool-panel">
+      <div class="pool-panel-block">
+        <div class="local-model-lbl" id="pool-chips-label">Pool (optional)</div>
+        <p class="pool-explainer" id="pool-explainer">Pick which installed models local routing may use. Leave all unchecked to allow the full library.</p>
+        <p class="params-sub pool-hint-line" id="pool-hint" role="status"></p>
+        <div id="pool-chips-root" class="pool-chips-grid" role="group" aria-labelledby="pool-chips-label"></div>
+      </div>
+      <select id="local-pool-select" class="pool-select-hidden" multiple aria-hidden="true" tabindex="-1" title="Synced from pool chips"></select>
+    </div>
+  </section>
+
+  <section class="dash-card dash-card--params" id="section-model-params" aria-labelledby="dash-gen-h">
+    <h2 class="dash-section-title" id="dash-gen-h">Generation parameters</h2>
+    <div class="params-toolbar">
+      <button type="button" class="pbtn pbtn-secondary" id="btn-open-gen-json" onclick="openModelParamsFilesModal()">Edit config (JSON)…</button>
+      <button type="button" class="pbtn pbtn-secondary" id="btn-open-gen-settings" onclick="openSettingsModal()">Generation settings…</button>
+    </div>
+  <div class="params-panel">
+    <div class="params-hdr">
+      <span class="params-hdr-label">Sliders</span>
+      <div class="pact">
+        <span class="saved-msg" id="saved-msg" aria-live="polite">Saved &#10003;</span>
+        <button type="button" class="pbtn pbtn-reset" onclick="resetParams()">Reset defaults</button>
+      </div>
+    </div>
+    <div class="params-grid">
+      ${paramSlider('temperature','Temperature','Randomness. Lower = focused.',0,2,.05,p.temperature)}
+      ${paramSlider('top_p','Top P','Nucleus sampling cutoff.',0,1,.05,p.top_p)}
+      ${paramSlider('top_k','Top K','Vocabulary pool size.',1,100,1,p.top_k)}
+      ${paramNumber('num_ctx','Context length','Tokens in context window. Affects VRAM.',512,131072,p.num_ctx)}
+      ${paramNumber('seed','Seed','0 = random. Fixed = reproducible.',-1,999999,p.seed)}
+      ${paramSlider('repeat_penalty','Repeat penalty','Discourages repetition. 1.0 = off.',1,1.5,.01,p.repeat_penalty)}
+    </div>
+    <span class="adv-toggle" id="adv-toggle" onclick="toggleAdv()">+ Advanced</span>
+    <div class="params-adv" id="params-adv">
+      ${paramNumber('num_predict','Max tokens','Output length. -1 = unlimited.',-1,4096,p.num_predict)}
+      ${paramSlider('min_p','Min P','Min probability vs top token.',0,.2,.01,p.min_p)}
+      ${paramNumber('repeat_last_n','Repeat last N','Repetition check window.',0,512,p.repeat_last_n)}
+      ${paramSlider('presence_penalty','Presence penalty','Penalise seen tokens.',0,1,.05,p.presence_penalty)}
+      ${paramSlider('frequency_penalty','Frequency penalty','Penalise frequent tokens.',0,1,.05,p.frequency_penalty)}
+    </div>
+  </div>
+  </section>
+
+  <footer class="dash-supporter-footer" role="contentinfo" aria-label="Support">
+    <div class="dash-supporter-row">
+      <span class="dash-supporter-text">Thanks for helping this tool advance.</span>
+      <a class="dash-bmc-link" href="https://buymeacoffee.com/bazoukajo" target="_blank" rel="noopener noreferrer">Buy Me a Coffee</a>
+    </div>
+  </footer>
+
+</div>
+
+<footer id="fixedLogFooter" class="fixed-log-footer" aria-label="Output window footer">
+  <div id="fixedLogResizer" class="fixed-log-resizer" title="Drag to resize output window"></div>
+  <section class="fixed-log-panel">
+    <div class="fixed-log-head">
+      <div class="fixed-log-title">Router log <span class="fixed-log-count">(<span id="fixedLogCount">0</span>)</span></div>
+      <div class="fixed-log-tools">
+        <button type="button" id="fixedLogToggleBtn" class="fixed-log-toggle" title="Collapse footer">Collapse</button>
+      </div>
+    </div>
+    <div id="fixedLogOutput" class="fixed-log-output"></div>
+  </section>
+</footer>
+
+<div id="settings-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+  <div class="modal-box modal-box--wide modal-box--settings">
+    <div class="modal-head">
+      <span id="settings-modal-title">Generation settings</span>
+      <button type="button" class="modal-x" id="settings-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body settings-body">
+      <div class="settings-panel" id="settings-panel-single">
+        <div class="settings-model-bar">
+          <span class="settings-model-name" id="settings-active-model-label">\u2014</span>
+          <span class="settings-pill off" id="settings-loaded-pill">—</span>
+        </div>
+        <details class="settings-hint-details" id="settings-hint-details">
+          <summary>How this table works</summary>
+          <div class="settings-hint-body">Edit numbers in place. <strong>Built-in</strong> = generic defaults plus a <strong>model-family preset</strong> matched from your Ollama tag (e.g. llama3, gemma4, qwen2.5). <strong>Global</strong> = that baseline plus your sparse overrides in <span class="inline-code">.claude/model-params.json</span>. <strong>Model</strong> = per-tag overrides only. <strong>Effective</strong> = next local request. <strong>Save global</strong> stores only values that differ from the built-in row for the active model. <strong>Save model overrides</strong> updates <span class="inline-code">.claude/model-params-per-model.json</span>. Raw JSON: <strong>Edit config (JSON)</strong>.</div>
+        </details>
+        <div class="wrap-table">
+          <table class="diff-table diff-table--editable" id="settings-diff-table">
+            <thead><tr><th>Parameter</th><th>Built-in</th><th title="All models">Global</th><th title="This model only">Model</th><th>Effective</th></tr></thead>
+            <tbody id="settings-diff-tbody"></tbody>
+          </table>
+        </div>
+        <div class="settings-actions settings-actions--footer">
+          <span class="saved-per-msg" id="settings-saved-global-msg">Saved \u2713</span>
+          <button type="button" class="pbtn pbtn-save" id="save-global-settings-btn">Save global</button>
+          <span class="saved-per-msg" id="settings-saved-per-msg">Saved \u2713</span>
+          <button type="button" class="pbtn pbtn-save" id="save-per-model-btn">Save model overrides</button>
+          <button type="button" class="pbtn pbtn-reset" id="clear-per-model-btn">Clear model overrides</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="params-files-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="params-files-modal-title">
+  <div class="modal-box modal-box--wide modal-box--settings">
+    <div class="modal-head">
+      <span id="params-files-modal-title">Model parameter files</span>
+      <button type="button" class="modal-x" id="params-files-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body settings-body">
+      <details class="settings-hint-details">
+        <summary>About these files</summary>
+        <div class="settings-hint-body">
+          <p><strong>Local Ollama only.</strong> The router applies these numbers to <strong>local</strong> completions only. Requests sent to Anthropic use the API defaults, which avoids burning cloud tokens when work stays on your GPU.</p>
+          <p><strong>Amber</strong> on the main sliders (or vs the Built-in column in the table) means a value differs from the built-in template.</p>
+          <p><strong>Files:</strong> <span class="inline-code">.claude/model-params.json</span> stores only <strong>sparse</strong> overrides on top of generic defaults plus a <strong>per-family preset</strong> chosen from your Ollama model tag (see <span class="inline-code">router/lib/ollama-model-presets.js</span>). An empty <code>{}</code> means &quot;use presets only&quot;. <span class="inline-code">.claude/model-params-per-model.json</span> maps each tag to extra overrides. Edit below or use sliders / <strong>Generation settings</strong>.</p>
+          <p>Unknown keys are ignored; values are coerced to numbers. POST may require <span class="inline-code">ROUTER_ADMIN_TOKEN</span> if set.</p>
+        </div>
+      </details>
+      <div class="params-files-tabs" role="tablist" aria-label="Config file">
+        <button type="button" class="params-file-tab" role="tab" id="tab-params-global" aria-controls="params-files-textarea" aria-selected="true">model-params.json</button>
+        <button type="button" class="params-file-tab" role="tab" id="tab-params-per" aria-controls="params-files-textarea" aria-selected="false">model-params-per-model.json</button>
+      </div>
+      <p class="params-files-path" id="params-files-path-hint">.claude/model-params.json</p>
+      <textarea id="params-files-textarea" class="params-files-textarea" spellcheck="false" autocomplete="off" aria-label="JSON contents"></textarea>
+      <p class="params-files-err" id="params-files-err" hidden role="alert"></p>
+      <div class="settings-actions settings-actions--footer" style="margin-top:10px">
+        <button type="button" class="pbtn pbtn-reset" id="params-files-reload">Reload from disk</button>
+        <button type="button" class="pbtn pbtn-save" id="params-files-save">Save to disk</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="model-info-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="model-info-title">
+  <div class="modal-box modal-box--wide">
+    <div class="modal-head">
+      <span id="model-info-title">Model details</span>
+      <button type="button" class="modal-x" id="model-info-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body info-modal-body">
+      <p class="info-readonly-note" id="info-readonly-note">Read-only snapshot for the model below. Values match the next <strong>local</strong> request (same as Generation settings effective column). Edit from the main page: <strong>Generation settings</strong> or <strong>Edit config (JSON)</strong>.</p>
+      <div class="info-hero">
+        <div class="info-hero-logo"><img src="/assets/ollama-logo.png" alt=""></div>
+        <div>
+          <div class="info-hero-name" id="info-hero-name">\u2014</div>
+          <div class="info-hero-meta" id="info-hero-meta"></div>
+        </div>
+      </div>
+      <div class="info-cards" id="info-cards"></div>
+      <div class="info-section-title">Router request (effective)</div>
+      <div class="info-opt-grid" id="info-opt-grid"></div>
+      <div class="info-actions">
+        <button type="button" class="mact mact-info" id="info-toggle-raw">Show raw JSON</button>
+      </div>
+      <pre class="info-raw-pre" id="model-info-pre" hidden></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Theme ──────────────────────────────────────────────────────────────────
+function toggleTheme(){
+  const root=document.documentElement;
+  const next=root.classList.contains('dark')?'light':'dark';
+  root.classList.remove('dark','light'); root.classList.add(next);
+  try{localStorage.setItem('theme',next);}catch{}
+}
+(function(){try{const t=localStorage.getItem('theme');if(t){document.documentElement.classList.remove('dark','light');document.documentElement.classList.add(t);}}catch{}})();
+
+function routerAuthHeaders(){
+  const h={};
+  try{const t=sessionStorage.getItem('routerAdminToken');if(t)h['X-Router-Token']=t;}catch{}
+  return h;
+}
+function routerFetch(url,opts){
+  opts=opts||{};
+  opts.headers=Object.assign({},opts.headers||{},routerAuthHeaders());
+  return fetch(url,opts);
+}
+/** Abort fetch after ms so the UI never stays on &quot;Checking…&quot; forever. */
+function fetchWithTimeout(url,ms,init){
+  init=init||{};
+  const ac=new AbortController();
+  const t=setTimeout(function(){ try{ ac.abort(); }catch(_){} },ms);
+  const next=Object.assign({},init,{signal:ac.signal});
+  return fetch(url,next).finally(function(){ clearTimeout(t); });
+}
+
+var hdrStickyRaf=0, hdrStickyLastPx=-1;
+function syncHdrStickyOffset(){
+  if(hdrStickyRaf)return;
+  hdrStickyRaf=requestAnimationFrame(function(){
+    hdrStickyRaf=0;
+    try{
+      const el=document.querySelector('.hdr');
+      if(!el)return;
+      const px=Math.ceil(el.getBoundingClientRect().height)+6;
+      if(px===hdrStickyLastPx)return;
+      hdrStickyLastPx=px;
+      document.documentElement.style.setProperty('--hdr-anchor-offset',px+'px');
+    }catch(_){}
+  });
+}
+window.addEventListener('resize',syncHdrStickyOffset);
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',syncHdrStickyOffset);
+else syncHdrStickyOffset();
+requestAnimationFrame(function(){ requestAnimationFrame(syncHdrStickyOffset); });
+
+// ── Sparkline ──────────────────────────────────────────────────────────────
+var routingMode=${jsonForInlineScript(routingModeInitial)};
+function applyRoutingModeButton(m){
+  var s=String(m||'').trim().toLowerCase();
+  if(s!=='cloud'&&s!=='local'&&s!=='hybrid')s='hybrid';
+  routingMode=s;
+  var b=document.getElementById('routing-mode-btn');
+  if(!b)return;
+  b.className='routing-mode-btn routing-mode--'+s;
+  b.textContent=s==='cloud'?'Claude only':s==='local'?'Ollama only':'Hybrid';
+  b.setAttribute('aria-label','Routing mode: '+(s==='cloud'?'Claude API only':s==='local'?'Ollama only':'Hybrid (smart local + Claude when needed)'));
+}
+const sparkData={cpu:[],ram:[],vram:[],gpu:[]};
+function drawSpark(id,data,color){
+  const c=document.getElementById(id); if(!c)return;
+  const w=c.offsetWidth||200, h=12;
+  c.width=w; c.height=h;
+  const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,w,h);
+  if(data.length<2)return;
+  const max=Math.max(...data,1), step=w/(data.length-1);
+  ctx.beginPath();
+  data.forEach((v,i)=>{ const x=i*step, y=h-(v/max)*h*.9; i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+  ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.stroke();
+  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
+  ctx.fillStyle=color.replace('rgb','rgba').replace(')',',0.15)');
+  try{ctx.fill();}catch{}
+}
+function pushSpark(key,val){ const d=sparkData[key]; d.push(val||0); if(d.length>30)d.shift(); }
+
+// ── System stats ───────────────────────────────────────────────────────────
+function applySystemStatsToDom(d){
+  if(!d||typeof d!=='object')return;
+  function pct(el,v){
+    if(!el)return;
+    if(v==null||v===''){ el.textContent='—%'; return; }
+    const n=Number(v);
+    el.textContent=Number.isFinite(n)?(Math.round(n)+'%'):'—%';
+  }
+  pct(document.getElementById('r-cpu'),d.cpu);
+  pct(document.getElementById('r-ram'),d.ram);
+  pct(document.getElementById('r-vram'),d.vram);
+  pct(document.getElementById('r-gpu'),d.gpu);
+}
+async function refreshStats(){
+  try{
+    const r=await fetchWithTimeout('/api/system-stats',15000);
+    if(!r.ok)return;
+    const d=await r.json();
+    applySystemStatsToDom(d);
+    pushSpark('cpu',d.cpu); pushSpark('ram',d.ram); pushSpark('vram',d.vram||0); pushSpark('gpu',d.gpu||0);
+    drawSpark('spark-cpu',sparkData.cpu,'rgb(96,165,250)');
+    drawSpark('spark-ram',sparkData.ram,'rgb(167,139,250)');
+    drawSpark('spark-vram',sparkData.vram,'rgb(34,197,94)');
+    drawSpark('spark-gpu',sparkData.gpu,'rgb(251,191,36)');
+  }catch{}
+}
+
+// ── Health & service controls ──────────────────────────────────────────────
+let _healthPollGen=0;
+async function refreshHealth(){
+  const badge=document.getElementById('health-badge');
+  const text=document.getElementById('health-text');
+  const rdot=document.getElementById('rdot');
+  try{
+    const r=await fetchWithTimeout('/api/health',10000);
+    if(!r.ok){
+      if(badge) badge.className='health-badge unhealthy';
+      if(text) text.textContent='Router HTTP '+r.status;
+      if(rdot) rdot.className='rdot err';
+      return;
+    }
+    const d=await r.json();
+    if(badge) badge.className='health-badge '+(d.status||'unhealthy');
+    if(d.status==='healthy'){
+      const m=Math.floor((d.uptime_seconds||0)/60), h=Math.floor(m/60);
+      if(text) text.textContent='Healthy'+(d.uptime_seconds?(' \u00b7 '+( h>0?h+'h '+m%60+'m':m+'m')):'');
+      if(rdot) rdot.className='rdot';
+    } else if(d.status==='degraded'){
+      if(text) text.textContent='Degraded \u00b7 Ollama not running';
+      if(rdot) rdot.className='rdot err';
+    } else {
+      if(text) text.textContent='Unhealthy'+(d.error?' \u00b7 '+d.error:'');
+      if(rdot) rdot.className='rdot err';
+    }
+    const running=d.status==='healthy';
+    const bs=document.getElementById('btn-start'), bt=document.getElementById('btn-stop'), br=document.getElementById('btn-restart');
+    if(bs) bs.disabled=running;
+    if(bt) bt.disabled=!running;
+    if(br) br.disabled=!running;
+    _healthPollGen++;
+    const chip=document.getElementById('chip-ollama');
+    if(chip && d.ollama_version && (_healthPollGen%8===1 || !chip.textContent||chip.textContent==='Ollama')){
+      chip.textContent='Ollama v'+d.ollama_version;
+    }
+    const lu=document.getElementById('last-update');
+    if(lu) lu.textContent=new Date().toLocaleTimeString();
+  }catch(e){
+    if(badge) badge.className='health-badge unhealthy';
+    if(text) text.textContent=(e&&e.name==='AbortError')?'Router not responding (timeout)':'Health check failed';
+    if(rdot) rdot.className='rdot err';
+  }
+}
+
+async function svcAction(action){
+  const btns=['btn-start','btn-stop','btn-restart'];
+  btns.forEach(id=>{ const b=document.getElementById(id); if(b)b.disabled=true; });
+  try{
+    await routerFetch('/api/service/'+action,{method:'POST'});
+    await new Promise(r=>setTimeout(r,2000));
+    await refreshHealth();
+    await refreshModel();
+    await refreshOllamaModelList();
+  }finally{
+    // re-enable based on actual state (refreshHealth sets them)
+  }
+}
+
+// ── Model card ─────────────────────────────────────────────────────────────
+function fmtBytes(n){
+  if(n==null||n==='')return '\u2014';
+  const x=typeof n==='number'?n:Number(n);
+  if(!Number.isFinite(x)||x<=0)return '\u2014';
+  const g=x/1e9;
+  return g>=1?g.toFixed(1)+' GB':(x/1e6).toFixed(0)+' MB';
+}
+function fmtCtxTok(n){ if(n==null||n===''||Number.isNaN(Number(n)))return '\u2014'; return Number(n).toLocaleString()+' tokens'; }
+
+function syncPoolHiddenSelect(){
+  const root=document.getElementById('pool-chips-root');
+  const ps=document.getElementById('local-pool-select');
+  if(!root||!ps)return;
+  const byVal=new Map([...root.querySelectorAll('.pool-chip input[type=checkbox]')].map(cb=>[cb.value,cb.checked]));
+  for(const opt of ps.options){
+    opt.selected=!!byVal.get(opt.value);
+  }
+}
+function updatePoolHint(){
+  const ph=document.getElementById('pool-hint');
+  const root=document.getElementById('pool-chips-root');
+  if(!ph)return;
+  const n=root?root.querySelectorAll('.pool-chip').length:0;
+  const checked=root?root.querySelectorAll('input[type=checkbox]:checked').length:0;
+  if(n===0){
+    ph.textContent='No models installed — run ollama pull';
+  }else if(checked===0){
+    ph.textContent=n+' model'+(n===1?'':'s')+' installed · full library allowed (check models to restrict the pool)';
+  }else{
+    ph.textContent=n+' installed · pool limited to '+checked+' model'+(checked===1?'':'s');
+  }
+}
+function renderPoolChips(models,want){
+  const root=document.getElementById('pool-chips-root');
+  const ps=document.getElementById('local-pool-select');
+  if(!root||!ps)return;
+  root.innerHTML='';
+  ps.innerHTML='';
+  const list=[];
+  const seen=new Set();
+  for(const m of (models||[])){
+    if(!m||!m.name||seen.has(m.name))continue;
+    seen.add(m.name);
+    list.push(m);
+  }
+  const restrict=want.size>0;
+  for(const m of list){
+    const on=restrict&&want.has(m.name);
+    const lbl=document.createElement('label');
+    lbl.className='pool-chip'+(on?' pool-chip--on':'');
+    const cb=document.createElement('input');
+    cb.type='checkbox';
+    cb.value=m.name;
+    cb.checked=on;
+    cb.setAttribute('aria-label','Include '+m.name+' in local routing pool');
+    const nameSpan=document.createElement('span');
+    nameSpan.className='pool-chip-name';
+    nameSpan.textContent=m.name;
+    nameSpan.title=m.name;
+    lbl.appendChild(cb);
+    lbl.appendChild(nameSpan);
+    if(m.size!=null){
+      const sz=document.createElement('span');
+      sz.className='pool-chip-size';
+      sz.textContent=fmtBytes(m.size);
+      lbl.appendChild(sz);
+    }
+    const onChipChange=()=>{
+      lbl.classList.toggle('pool-chip--on',cb.checked);
+      syncPoolHiddenSelect();
+      updatePoolHint();
+    };
+    cb.addEventListener('change',onChipChange);
+    root.appendChild(lbl);
+    const opt=document.createElement('option');
+    opt.value=m.name;
+    opt.textContent=m.name;
+    opt.selected=on;
+    ps.appendChild(opt);
+  }
+  updatePoolHint();
+}
+
+async function refreshOllamaModelList(){
+  try{
+    const r=await fetchWithTimeout('/api/ollama-models',45000);
+    if(!r.ok)return;
+    const d=await r.json();
+    let want=new Set();
+    let fastCur='';
+    const rCfg=await fetchWithTimeout('/api/router/local-routing-config',8000);
+    if(rCfg.ok){
+      try{
+        const cfg=await rCfg.json();
+        want=new Set(cfg.models||[]);
+        fastCur=typeof cfg.fast_model==='string'?cfg.fast_model.trim():'';
+        const cb=document.getElementById('smart-routing-cb');
+        if(cb)cb.checked=cfg.smart_routing!==false;
+      }catch{}
+    }
+    const cur=d.configured_model||'';
+    const sel=document.getElementById('local-model-select');
+    if(sel){
+      sel.innerHTML='';
+      const seen=new Set();
+      for(const m of (d.models||[])){
+        if(!m||!m.name||seen.has(m.name))continue;
+        seen.add(m.name);
+        const o=document.createElement('option');
+        o.value=m.name;
+        let label=m.name;
+        if(m.size!=null)label+=' ('+fmtBytes(m.size)+')';
+        o.textContent=label;
+        if(m.name===cur)o.selected=true;
+        sel.appendChild(o);
+      }
+      if(cur&&!seen.has(cur)){
+        const o=document.createElement('option');
+        o.value=cur;
+        o.textContent=cur+' (configured, not in ollama list)';
+        o.selected=true;
+        sel.appendChild(o);
+      }
+    }
+    const fastSel=document.getElementById('fast-model-select');
+    if(fastSel){
+      fastSel.innerHTML='';
+      const noneOpt=document.createElement('option');
+      noneOpt.value='';
+      noneOpt.textContent='(None)';
+      fastSel.appendChild(noneOpt);
+      const seenFast=new Set();
+      for(const m of (d.models||[])){
+        if(!m||!m.name||seenFast.has(m.name))continue;
+        seenFast.add(m.name);
+        const o=document.createElement('option');
+        o.value=m.name;
+        let label=m.name;
+        if(m.size!=null)label+=' ('+fmtBytes(m.size)+')';
+        o.textContent=label;
+        fastSel.appendChild(o);
+      }
+      if(fastCur&&!seenFast.has(fastCur)){
+        const o=document.createElement('option');
+        o.value=fastCur;
+        o.textContent=fastCur+' (in config, not in ollama list)';
+        fastSel.appendChild(o);
+      }
+      fastSel.value=fastCur;
+    }
+    renderPoolChips(d.models,want);
+  }catch{}
+}
+
+function vramStripTagLoose(s){
+  const n=String(s||'').trim().toLowerCase();
+  const i=n.lastIndexOf(':');
+  if(i<=0)return n;
+  const t=n.slice(i+1);
+  if(!/^[a-z0-9._+-]+$/i.test(t))return n;
+  return n.slice(0,i);
+}
+function vramNamesMatch(cfg, psName){
+  const a=String(cfg||'').trim().toLowerCase();
+  const b=String(psName||'').trim().toLowerCase();
+  if(!a||!b)return false;
+  if(a===b)return true;
+  const sa=vramStripTagLoose(a), sb=vramStripTagLoose(b);
+  return sa===sb || a===sb || sa===b;
+}
+function setVramActionButtons(d){
+  const st=document.getElementById('btn-m-start'), sp=document.getElementById('btn-m-stop'), sr=document.getElementById('btn-m-restart');
+  const hasAny=Array.isArray(d.loaded_list)&&d.loaded_list.length>0;
+  const cfgLoaded=!!d.configured_loaded;
+  if(st) st.disabled=cfgLoaded;
+  if(sp) sp.disabled=!hasAny;
+  if(sr) sr.disabled=false;
+}
+function specItem(iconChar, label, value, title){
+  const row=document.createElement('div');
+  row.className='spec-item';
+  const ic=document.createElement('div');
+  ic.className='spec-icon';
+  const ch=document.createElement('span');
+  ch.className='spec-ico-char';
+  ch.setAttribute('aria-hidden','true');
+  ch.textContent=iconChar;
+  ic.appendChild(ch);
+  const ct=document.createElement('div');
+  ct.className='spec-content';
+  const lb=document.createElement('div');
+  lb.className='spec-label';
+  lb.textContent=label;
+  const vl=document.createElement('div');
+  vl.className='spec-value';
+  vl.textContent=value;
+  if(title) vl.title=title;
+  ct.appendChild(lb); ct.appendChild(vl);
+  row.appendChild(ic); row.appendChild(ct);
+  return row;
+}
+function buildVramLoadedCardCompact(col, row, d){
+  const card=document.createElement('div');
+  card.className='model-card h-100 loaded vram-card-compact';
+  card.dataset.modelName=row.name;
+  const head=document.createElement('div');
+  head.className='model-header model-card-head';
+  const iw=document.createElement('div');
+  iw.className='model-icon-wrapper';
+  iw.setAttribute('aria-hidden','true');
+  iw.innerHTML='<span class="model-icon-main"><i class="fas fa-brain" aria-hidden="true"></i></span>';
+  const body=document.createElement('div');
+  body.className='model-card-head-body';
+  const nr=document.createElement('div');
+  nr.className='model-card-head-name-row';
+  const title=document.createElement('div');
+  title.className='model-title';
+  const disp=document.createElement('span');
+  disp.className='model-title-display';
+  const full=document.createElement('span');
+  full.className='model-title-full';
+  full.textContent=row.name||'\u2014';
+  disp.appendChild(full);
+  title.appendChild(disp);
+  const trail=document.createElement('div');
+  trail.className='model-card-head-trail';
+  trail.setAttribute('aria-label','Model status');
+  const meta=document.createElement('div');
+  meta.className='model-meta';
+  const pill=document.createElement('span');
+  pill.className='status-indicator running';
+  pill.innerHTML='<span>Loaded</span>';
+  meta.appendChild(pill);
+  if(vramNamesMatch(d.configured_model, row.name)){
+    const b=document.createElement('span');
+    b.className='model-list-badge default';
+    b.style.marginLeft='8px';
+    b.textContent='Default';
+    b.title='Router default model';
+    meta.appendChild(b);
+  }
+  trail.appendChild(meta);
+  nr.appendChild(title); nr.appendChild(trail);
+  body.appendChild(nr);
+  head.appendChild(iw); head.appendChild(body);
+  const specs=document.createElement('div');
+  specs.className='model-specs';
+  const r1=document.createElement('div');
+  r1.className='spec-row';
+  r1.appendChild(specItem('\u{1F5A5}','VRAM',fmtBytes(row.size_vram),'From Ollama /api/ps'));
+  if(row.digest){
+    const dg=document.createElement('div');
+    dg.className='vram-digest';
+    dg.textContent=String(row.digest).slice(0, 20)+(String(row.digest).length>20?'…':'');
+    dg.title=row.digest;
+    specs.appendChild(r1);
+    specs.appendChild(dg);
+  } else {
+    specs.appendChild(r1);
+  }
+  card.appendChild(head);
+  card.appendChild(specs);
+  col.appendChild(card);
+}
+function buildVramLoadedCardFull(col, row, d){
+  const m=d.model||{};
+  const cs=d.card_specs||{};
+  const card=document.createElement('div');
+  card.className='model-card h-100 loaded';
+  card.dataset.modelName=row.name||'';
+  const head=document.createElement('div');
+  head.className='model-header model-card-head';
+  head.innerHTML='<div class="model-icon-wrapper" aria-hidden="true"><span class="model-icon-main"><i class="fas fa-brain" aria-hidden="true"></i></span></div><div class="model-card-head-body"><div class="model-card-head-name-row"><div class="model-title"><span class="model-title-display"><span class="model-title-full" id="mc-name"></span></span></div><div class="model-card-head-trail" aria-label="Model status"><div class="model-meta"><span class="status-indicator running" id="mc-status-pill"><span id="mc-status">Loaded</span></span></div><div class="model-card-head-aside" aria-label="Capabilities"><div class="model-capabilities"><span class="capability-icon unknown" id="cap-reasoning" title="Reasoning"><i class="fas fa-brain" aria-hidden="true"></i></span><span class="capability-icon unknown" id="cap-vision" title="Image processing"><i class="fas fa-image" aria-hidden="true"></i></span><span class="capability-icon unknown" id="cap-tools" title="Tool usage"><i class="fas fa-tools" aria-hidden="true"></i></span></div></div></div></div></div>';
+  head.querySelector('#mc-name').textContent=row.name||m.name||m.model||'\u2014';
+  const specs=document.createElement('div');
+  specs.className='model-specs';
+  specs.id='mc-specs';
+  const mkRow=(a,b)=>{ const r=document.createElement('div'); r.className='spec-row'; r.appendChild(a); r.appendChild(b); return r; };
+  const fam=(cs&&cs.family)||m.details?.family||'\u2014';
+  const par=(cs&&cs.parameter_size)||m.details?.parameter_size||'\u2014';
+  const qua=(cs&&cs.quantization_level)||m.details?.quantization_level||'\u2014';
+  const sz=(cs&&cs.size!=null)?cs.size:m.size;
+  const sv=(cs&&cs.size_vram!=null)?cs.size_vram:m.size_vram;
+  const szN=typeof sz==='number'?sz:Number(sz);
+  const svN=typeof sv==='number'?sv:Number(sv);
+  const vp=Number.isFinite(szN)&&szN>0&&Number.isFinite(svN)?Math.round(svN/szN*100):0;
+  const vramTxt=fmtBytes(sv)+(vp?' ('+vp+'%)':'');
+  const r1=document.createElement('div'); r1.className='spec-row';
+  const i1=specItem('\u2699','Family',fam||'\u2014'); i1.querySelector('.spec-value').id='mc-family';
+  const i2=specItem('\u2696','Parameters',par||'\u2014'); i2.querySelector('.spec-value').id='mc-params';
+  r1.appendChild(i1); r1.appendChild(i2);
+  const r2=document.createElement('div'); r2.className='spec-row';
+  const i3=specItem('\u{1F4BE}','Quant',qua||'\u2014'); i3.querySelector('.spec-value').id='mc-quant';
+  const i4=specItem('\u{1F4E6}','Disk size',fmtBytes(sz)); i4.querySelector('.spec-value').id='mc-size';
+  r2.appendChild(i3); r2.appendChild(i4);
+  const r3=document.createElement('div'); r3.className='spec-row';
+  const i5=specItem('\u{1F3AE}','VRAM used',vramTxt); i5.querySelector('.spec-value').id='mc-vram';
+  const i6=specItem('\u{1F4C8}','Max context',fmtCtxTok(d.context_max)); i6.querySelector('.spec-value').id='mc-ctx-max'; i6.querySelector('.spec-value').title='From model metadata (Ollama show)';
+  r3.appendChild(i5); r3.appendChild(i6);
+  const r4=document.createElement('div'); r4.className='spec-row';
+  const i7=specItem('\u2194','Allocated',fmtCtxTok(d.context_allocated)); i7.querySelector('.spec-value').id='mc-ctx-alloc'; i7.querySelector('.spec-value').title='Context for loaded process (Ollama /api/ps)';
+  const i8=specItem('\u26A1','Router request',fmtCtxTok(d.request_num_ctx)); const sv8=i8.querySelector('.spec-value'); sv8.id='mc-ctx-req'; sv8.classList.add('js-vram-router-req'); sv8.title='Effective num_ctx for next local completion';
+  r4.appendChild(i7); r4.appendChild(i8);
+  specs.appendChild(r1); specs.appendChild(r2); specs.appendChild(r3); specs.appendChild(r4);
+  const none=document.createElement('p');
+  none.className='no-model-banner';
+  none.id='mc-none';
+  none.style.display='none';
+  none.innerHTML='No model loaded in Ollama. Use <strong>Start</strong> or load the model from the CLI.';
+  card.appendChild(head);
+  card.appendChild(specs);
+  card.appendChild(none);
+  col.appendChild(card);
+}
+/** Compact empty state when Ollama has nothing in GPU memory (no fake “model card”). */
+function buildVramEmptyState(root, d){
+  const wrap=document.createElement('div');
+  wrap.className='vram-empty-state';
+  wrap.setAttribute('role','status');
+  const title=document.createElement('div');
+  title.className='vram-empty-title';
+  title.textContent='No model loaded in GPU memory';
+  const sub=document.createElement('div');
+  sub.className='vram-empty-sub';
+  const cfg=String(d.configured_model||'').trim();
+  if(cfg) sub.textContent='Default is set to \u201c'+cfg+'\u201d. Use Start below, or pick another default above.';
+  else sub.textContent='Choose a default model above, then use Start to load it.';
+  const ctx=document.createElement('div');
+  ctx.className='vram-empty-ctx';
+  ctx.append('Max context ');
+  const mx=document.createElement('span');
+  mx.textContent=fmtCtxTok(d.context_max);
+  ctx.appendChild(mx);
+  ctx.append(' \u00b7 Next request ');
+  const rq=document.createElement('span');
+  rq.className='js-vram-router-req';
+  rq.id='mc-ctx-req';
+  rq.textContent=fmtCtxTok(d.request_num_ctx);
+  rq.title='Effective num_ctx for next local completion';
+  ctx.appendChild(rq);
+  const note=document.createElement('div');
+  note.className='vram-empty-note';
+  note.textContent='Header VRAM % can stay above 0 with no model loaded (GPU driver / Ollama baseline).';
+  wrap.appendChild(title);
+  wrap.appendChild(sub);
+  wrap.appendChild(ctx);
+  wrap.appendChild(note);
+  root.appendChild(wrap);
+}
+function buildVramConfiguredIdleAside(root, d){
+  const cfg=d.configured_model||'';
+  if(!cfg)return;
+  const col=document.createElement('div');
+  col.className='col';
+  const card=document.createElement('div');
+  card.className='model-card h-100 unloaded';
+  card.style.borderStyle='dashed';
+  card.dataset.modelName=cfg;
+  const head=document.createElement('div');
+  head.className='model-header model-card-head';
+  const t=document.createElement('div');
+  t.className='model-card-head-body';
+  t.innerHTML='<div class="model-card-head-name-row"><div class="model-title"><span class="model-title-display"><span class="model-title-full"></span></span></div><div class="model-meta"><span class="status-indicator available"><span>Default · not in VRAM</span></span></div></div>';
+  t.querySelector('.model-title-full').textContent=cfg;
+  head.innerHTML='<div class="model-icon-wrapper" aria-hidden="true"><span class="model-icon-main"><i class="fas fa-sliders-h" aria-hidden="true"></i></span></div>';
+  head.appendChild(t);
+  const specs=document.createElement('div');
+  specs.className='model-specs';
+  const r=document.createElement('div');
+  r.className='spec-row';
+  r.appendChild(specItem('\u{1F4C8}','Max context',fmtCtxTok(d.context_max)));
+  const rq=specItem('\u26A1','Router request',fmtCtxTok(d.request_num_ctx));
+  rq.querySelector('.spec-value').classList.add('js-vram-router-req');
+  r.appendChild(rq);
+  specs.appendChild(r);
+  card.appendChild(head);
+  card.appendChild(specs);
+  col.appendChild(card);
+  root.appendChild(col);
+}
+function renderVramSection(d){
+  const root=document.getElementById('vram-cards-root');
+  const hint=document.getElementById('vram-default-hint');
+  if(!root)return;
+  root.replaceChildren();
+  if(hint){
+    hint.style.display='none';
+    hint.textContent='';
+  }
+  const list=Array.isArray(d.loaded_list)?d.loaded_list:[];
+  const cfg=d.configured_model||'';
+  if(list.length===0){
+    buildVramEmptyState(root, d);
+    if(hint){
+      hint.textContent='';
+      hint.style.display='none';
+    }
+    return;
+  }
+  for(const row of list){
+    if(!row||!row.name)continue;
+    const col=document.createElement('div');
+    col.className='col';
+    col.setAttribute('role','listitem');
+    const full=vramNamesMatch(cfg, row.name)&&d.loaded&&d.model;
+    if(full) buildVramLoadedCardFull(col, row, d);
+    else buildVramLoadedCardCompact(col, row, d);
+    root.appendChild(col);
+  }
+  if(!d.configured_loaded&&cfg){
+    buildVramConfiguredIdleAside(root, d);
+    if(hint){
+      hint.textContent='Your default model is not the one loaded above; routing may use a different name until you align them.';
+      hint.style.display='block';
+    }
+  }
+}
+
+function applyCapabilityIconState(id, value, titleOk, titleOff, titleUnknown){
+  const el=document.getElementById(id);
+  if(!el)return;
+  el.classList.remove('enabled','disabled','unknown');
+  if(value===true){ el.classList.add('enabled'); el.title=titleOk; }
+  else if(value===false){ el.classList.add('disabled'); el.title=titleOff; }
+  else { el.classList.add('unknown'); el.title=titleUnknown; }
+}
+
+function applyCapabilityStates(caps){
+  applyCapabilityIconState('cap-reasoning', caps?.has_reasoning, 'Reasoning supported', 'Reasoning not indicated', 'Reasoning unknown (no capabilities from Ollama)');
+  applyCapabilityIconState('cap-vision', caps?.has_vision, 'Image / vision supported', 'Vision not supported', 'Vision unknown (no capabilities from Ollama)');
+  applyCapabilityIconState('cap-tools', caps?.has_tools, 'Tool usage supported', 'Tools not supported', 'Tools unknown (no capabilities from Ollama)');
+}
+
+async function refreshModel(){
+  try{
+    const r=await fetchWithTimeout('/api/model-status',25000); if(!r.ok)return;
+    const d=await r.json();
+    renderVramSection(d);
+    setVramActionButtons(d);
+    applyCapabilityStates(d.capabilities);
+    const reqEl=document.querySelector('.js-vram-router-req');
+    if(reqEl){
+      reqEl.textContent=fmtCtxTok(d.request_num_ctx);
+      const cm=Number(d.context_max), rq=Number(d.request_num_ctx);
+      reqEl.classList.toggle('ctx-warn', Number.isFinite(cm)&&Number.isFinite(rq)&&rq>cm);
+      reqEl.title=reqEl.classList.contains('ctx-warn')?'num_ctx exceeds metadata max; Ollama may clamp':'Effective num_ctx for next local completion';
+    }
+  }catch{
+    applyCapabilityStates(null);
+  }
+}
+
+async function burstRefreshAfterModelAction(){
+  const delays=[450,550,700,900,1100,1300];
+  for(let i=0;i<delays.length;i++){
+    await new Promise(r=>setTimeout(r,delays[i]));
+    await refreshModel();
+    await refreshOllamaModelList();
+  }
+  await syncGenerationSlidersFromServer();
+  await refreshHealth();
+}
+async function modelAction(url){
+  try{
+    await routerFetch(url,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+    await new Promise(x=>setTimeout(x,500));
+    await refreshModel();
+    await syncGenerationSlidersFromServer();
+    await refreshHealth();
+    void burstRefreshAfterModelAction();
+  }catch{}
+}
+
+let infoRawVisible=false;
+function openModelInfoModal(){
+  const modal=document.getElementById('model-info-modal');
+  if(!modal)return;
+  infoRawVisible=false;
+  const pre=document.getElementById('model-info-pre');
+  const btn=document.getElementById('info-toggle-raw');
+  if(pre){ pre.hidden=true; pre.textContent=''; }
+  if(btn) btn.textContent='Show raw JSON';
+  document.getElementById('info-hero-name').textContent='Loading\u2026';
+  document.getElementById('info-hero-meta').textContent='';
+  document.getElementById('info-cards').innerHTML='';
+  document.getElementById('info-opt-grid').innerHTML='';
+  modal.hidden=false;
+  fetch('/api/router/model-details').then(r=>r.json()).then(j=>{
+    window.__lastModelDetails=j;
+    document.getElementById('info-hero-name').textContent=j.model||'\u2014';
+    const s=j.summary;
+    const metaEl=document.getElementById('info-hero-meta');
+    if(metaEl) metaEl.textContent=s?[s.family,s.parameter_size,s.quantization_level].filter(Boolean).join(' \u00b7 '):'';
+    const cards=document.getElementById('info-cards');
+    cards.innerHTML='';
+    if(s){
+      const items=[['Family',s.family],['Parameters',s.parameter_size],['Quantization',s.quantization_level],['Format',s.format],['Max context',s.context_max!=null?s.context_max.toLocaleString()+' tokens':null],['License',s.license],['Modified',s.modified_at]];
+      for(const [lab,val]of items){
+        if(val==null||val==='')continue;
+        const card=document.createElement('div');
+        card.className='info-card';
+        card.innerHTML='<div class="info-card-lbl">'+escHtml(lab)+'</div><div class="info-card-val">'+escHtml(String(val))+'</div>';
+        cards.appendChild(card);
+      }
+    }
+    const og=document.getElementById('info-opt-grid');
+    og.innerHTML='';
+    const ro=j.router_request_options||{};
+    const keys=['temperature','top_p','top_k','num_ctx','num_predict','repeat_penalty','seed'];
+    for(const k of keys){
+      if(ro[k]===undefined)continue;
+      const chip=document.createElement('div');
+      chip.className='info-opt-chip';
+      chip.innerHTML='<span>'+escHtml(k.replace(/_/g,' '))+'</span>'+escHtml(String(ro[k]));
+      og.appendChild(chip);
+    }
+  }).catch(()=>{
+    document.getElementById('info-hero-name').textContent='Failed to load';
+  });
+}
+function closeModelInfoModal(){
+  const modal=document.getElementById('model-info-modal');
+  if(modal) modal.hidden=true;
+}
+function formatParamKey(k){ return k.replace(/_/g,' '); }
+function closeSettingsModal(){ const m=document.getElementById('settings-modal'); if(m) m.hidden=true; }
+let paramsFilesActiveTab='global';
+const paramsFilesStash={global:'',perModel:''};
+function stashParamsFilesFromTextarea(){
+  const ta=document.getElementById('params-files-textarea');
+  if(!ta)return;
+  if(paramsFilesActiveTab==='global') paramsFilesStash.global=ta.value;
+  else paramsFilesStash.perModel=ta.value;
+}
+function setParamsFilesErr(msg){
+  const el=document.getElementById('params-files-err');
+  if(!el)return;
+  if(msg){ el.textContent=msg; el.hidden=false; }
+  else{ el.textContent=''; el.hidden=true; }
+}
+function updateParamsFileTabUi(){
+  document.getElementById('tab-params-global')?.setAttribute('aria-selected',paramsFilesActiveTab==='global'?'true':'false');
+  document.getElementById('tab-params-per')?.setAttribute('aria-selected',paramsFilesActiveTab==='per-model'?'true':'false');
+  const hint=document.getElementById('params-files-path-hint');
+  if(hint) hint.textContent=paramsFilesActiveTab==='global'?'.claude/model-params.json':'.claude/model-params-per-model.json';
+}
+function applyParamsFilesTextareaFromStash(){
+  const ta=document.getElementById('params-files-textarea');
+  if(!ta)return;
+  ta.value=paramsFilesActiveTab==='global'?paramsFilesStash.global:paramsFilesStash.perModel;
+}
+function switchParamsFilesTab(which){
+  stashParamsFilesFromTextarea();
+  paramsFilesActiveTab=which==='per-model'?'per-model':'global';
+  updateParamsFileTabUi();
+  applyParamsFilesTextareaFromStash();
+  setParamsFilesErr('');
+}
+async function openModelParamsFilesModal(){
+  const m=document.getElementById('params-files-modal');
+  if(!m)return;
+  setParamsFilesErr('');
+  paramsFilesActiveTab='global';
+  updateParamsFileTabUi();
+  m.hidden=false;
+  try{
+    const loadOne=async (which)=>{
+      const r=await fetch('/api/router/model-params-raw?which='+encodeURIComponent(which));
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+      return j;
+    };
+    const [gr,pr]=await Promise.all([loadOne('global'),loadOne('per-model')]);
+    paramsFilesStash.global=gr.content||'';
+    paramsFilesStash.perModel=pr.content||'';
+    applyParamsFilesTextareaFromStash();
+  }catch(e){
+    setParamsFilesErr('Could not load files: '+String(e.message||e));
+  }
+}
+function closeParamsFilesModal(){
+  const m=document.getElementById('params-files-modal');
+  if(m) m.hidden=true;
+}
+async function reloadParamsFilesActive(){
+  setParamsFilesErr('');
+  const which=paramsFilesActiveTab==='per-model'?'per-model':'global';
+  try{
+    const r=await fetch('/api/router/model-params-raw?which='+encodeURIComponent(which));
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){ setParamsFilesErr(j.error||('HTTP '+r.status)); return; }
+    const c=j.content||'';
+    if(which==='global') paramsFilesStash.global=c;
+    else paramsFilesStash.perModel=c;
+    applyParamsFilesTextareaFromStash();
+  }catch(e){
+    setParamsFilesErr('Reload failed: '+String(e.message||e));
+  }
+}
+async function saveParamsFilesActive(){
+  stashParamsFilesFromTextarea();
+  setParamsFilesErr('');
+  const which=paramsFilesActiveTab==='per-model'?'per-model':'global';
+  const content=which==='global'?paramsFilesStash.global:paramsFilesStash.perModel;
+  try{
+    const r=await routerFetch('/api/router/model-params-raw',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({which,content})});
+    if(!r.ok){
+      let err='HTTP '+r.status;
+      try{ const j=await r.json(); if(j.error) err=j.error; }catch{}
+      setParamsFilesErr(err);
+      return;
+    }
+    await reloadParamsFilesActive();
+    await syncGenerationSlidersFromServer();
+    try{ await refreshParamsFullAndRender(); }catch{}
+    await refreshModel();
+  }catch(e){
+    setParamsFilesErr(String(e.message||e));
+  }
+}
+function fmtDiffNum(v){
+  if(typeof v==='string'&&v.trim()!==''){
+    const n=Number(v);
+    if(Number.isFinite(n)) v=n;
+  }
+  if(typeof v!=='number'||!Number.isFinite(v)) return '\u2014';
+  return Number.isInteger(v)?String(v):v.toFixed(4).replace(/\.?0+$/,'');
+}
+function updateSettingsEffectiveCell(key){
+  const gInp=document.getElementById('sg-'+key);
+  const cb=document.querySelector('#settings-diff-tbody .ov-cb[data-key="'+key+'"]');
+  const mInp=document.getElementById('om-'+key);
+  const effEl=document.querySelector('#settings-diff-tbody .settings-eff[data-key="'+key+'"]');
+  if(!effEl)return;
+  const ng=gInp?Number(gInp.value):NaN;
+  const useM=cb&&cb.checked&&mInp;
+  const nm=useM?Number(mInp.value):ng;
+  effEl.textContent=Number.isFinite(nm)?fmtDiffNum(nm):'\u2014';
+}
+function attachSettingsTableListeners(){
+  const tb=document.getElementById('settings-diff-tbody');
+  if(!tb)return;
+  tb.querySelectorAll('.ov-cb').forEach((cb)=>{
+    const key=cb.dataset.key;
+    const sync=()=>{
+      const tr=cb.closest('tr');
+      if(tr){
+        tr.classList.toggle('settings-row-model-off',!cb.checked);
+        tr.classList.toggle('row-has-patch',!!cb.checked);
+      }
+      updateSettingsEffectiveCell(key);
+    };
+    cb.addEventListener('change',sync);
+    sync();
+  });
+  tb.querySelectorAll('.om-inp').forEach((inp)=>{
+    const key=inp.id.slice(3);
+    const enableRow=()=>{
+      const tr=inp.closest('tr');
+      const cbx=tr&&tr.querySelector('.ov-cb');
+      if(cbx&&!cbx.checked){
+        cbx.checked=true;
+        tr.classList.remove('settings-row-model-off');
+        tr.classList.add('row-has-patch');
+      }
+      updateSettingsEffectiveCell(key);
+    };
+    inp.addEventListener('focus',enableRow);
+    inp.addEventListener('pointerdown',enableRow);
+    inp.addEventListener('input',enableRow);
+  });
+  tb.querySelectorAll('.settings-global-inp').forEach((inp)=>{
+    const key=inp.dataset.key;
+    inp.addEventListener('input',()=>updateSettingsEffectiveCell(key));
+  });
+}
+async function refreshParamsFullAndRender(){
+  const r=await fetch('/api/model-params-full');
+  const d=await r.json();
+  window.__paramsFull=d;
+  const tb=document.getElementById('settings-diff-tbody');
+  tb.innerHTML='';
+  for(const key of d.param_keys){
+    const bi=d.built_in[key], g=d.global[key], p=d.per_model_patch[key], e=d.effective[key];
+    const has=Object.prototype.hasOwnProperty.call(d.per_model_patch,key);
+    const gv=typeof g==='number'&&Number.isFinite(g)?g:bi;
+    const mv=has&&typeof p==='number'&&Number.isFinite(p)?p:gv;
+    const tr=document.createElement('tr');
+    if(has) tr.classList.add('row-has-patch');
+    const td0=document.createElement('td');
+    td0.textContent=formatParamKey(key);
+    const td1=document.createElement('td');
+    td1.textContent=fmtDiffNum(bi);
+    const td2=document.createElement('td');
+    const gin=document.createElement('input');
+    gin.type='number';
+    gin.step='any';
+    gin.className='param-num settings-global-inp';
+    gin.dataset.key=key;
+    gin.id='sg-'+key;
+    gin.setAttribute('aria-label','Global '+formatParamKey(key));
+    gin.value=String(gv);
+    td2.appendChild(gin);
+    const td3=document.createElement('td');
+    td3.className='settings-model-cell diff-patch';
+    const lab=document.createElement('label');
+    lab.className='settings-ov-label';
+    const cb=document.createElement('input');
+    cb.type='checkbox';
+    cb.className='ov-cb';
+    cb.dataset.key=key;
+    cb.checked=has;
+    cb.title='Override global for this model';
+    cb.setAttribute('aria-label','Per-model override for '+formatParamKey(key));
+    lab.appendChild(cb);
+    const oinp=document.createElement('input');
+    oinp.type='number';
+    oinp.step='any';
+    oinp.className='param-num om-inp';
+    oinp.id='om-'+key;
+    oinp.setAttribute('aria-label','Model override '+formatParamKey(key));
+    oinp.value=String(mv);
+    td3.appendChild(lab);
+    td3.appendChild(oinp);
+    const td4=document.createElement('td');
+    const eff=document.createElement('strong');
+    eff.className='settings-eff';
+    eff.dataset.key=key;
+    eff.textContent=fmtDiffNum(e);
+    td4.appendChild(eff);
+    tr.appendChild(td0);
+    tr.appendChild(td1);
+    tr.appendChild(td2);
+    tr.appendChild(td3);
+    tr.appendChild(td4);
+    tb.appendChild(tr);
+  }
+  document.getElementById('settings-active-model-label').textContent=d.active_model||'\u2014';
+  const pill=document.getElementById('settings-loaded-pill');
+  pill.textContent=d.loaded?'Loaded':'Not loaded';
+  pill.className='settings-pill '+(d.loaded?'on':'off');
+  attachSettingsTableListeners();
+  applyMainSlidersFromParamsFull(d);
+}
+async function alertFailedSave(r,ctx){
+  let t='HTTP '+r.status;
+  try{ const j=await r.json(); if(j.error)t=j.error; if(j.hint)t+=' — '+j.hint;}catch{}
+  alert((ctx||'Save')+' failed: '+t+(r.status===401?'\\n\\nIf ROUTER_ADMIN_TOKEN is set, store it once in this tab: sessionStorage.setItem("routerAdminToken","YOUR_TOKEN")':''));
+}
+async function saveGlobalFromSettingsModal(){
+  const d=window.__paramsFull;
+  if(!d)return;
+  const out={...d.global};
+  for(const key of d.param_keys){
+    const inp=document.getElementById('sg-'+key);
+    if(!inp)continue;
+    const n=Number(inp.value);
+    if(Number.isFinite(n)) out[key]=n;
+  }
+  out._for_model=d.active_model;
+  const r=await routerFetch('/api/model-params',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(out)});
+  if(!r.ok){ await alertFailedSave(r,'Save global'); return; }
+  const msg=document.getElementById('settings-saved-global-msg');
+  if(msg){ msg.style.opacity=1; setTimeout(()=>{ msg.style.opacity=0; },2200); }
+  await refreshParamsFullAndRender();
+  await refreshModel();
+}
+function collectPerModelOverrides(){
+  const out={};
+  const root=document.getElementById('settings-diff-tbody');
+  if(!root)return out;
+  root.querySelectorAll('.ov-cb').forEach(cb=>{
+    if(!cb.checked)return;
+    const key=cb.dataset.key;
+    const inp=document.getElementById('om-'+key);
+    if(!inp)return;
+    const n=Number(inp.value);
+    if(Number.isFinite(n)) out[key]=n;
+  });
+  return out;
+}
+async function savePerModelOverrides(){
+  const d=window.__paramsFull;
+  if(!d)return;
+  const overrides=collectPerModelOverrides();
+  const r=await routerFetch('/api/model-params-per-model',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:d.active_model,overrides})});
+  if(!r.ok){ await alertFailedSave(r,'Save model overrides'); return; }
+  const msg=document.getElementById('settings-saved-per-msg');
+  if(msg){ msg.style.opacity=1; setTimeout(()=>msg.style.opacity=0,2200); }
+  await refreshParamsFullAndRender();
+  await refreshModel();
+}
+async function clearPerModelOverrides(){
+  const d=window.__paramsFull;
+  if(!d)return;
+  const r=await routerFetch('/api/model-params-per-model',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:d.active_model,overrides:{}})});
+  if(!r.ok){ await alertFailedSave(r,'Clear overrides'); return; }
+  await refreshParamsFullAndRender();
+  await refreshModel();
+}
+async function openSettingsModal(){
+  try{ await refreshParamsFullAndRender(); }catch{}
+  document.getElementById('settings-modal').hidden=false;
+}
+
+// ── Parameters ──────────────────────────────────────────────────────────────
+const DEFAULTS=${jsonForInlineScript(PARAM_DEFAULTS)};
+let current=${jsonForInlineScript(p)};
+function baselineForPills(){
+  try{
+    const d=window.__paramsFull;
+    if(d&&d.built_in&&typeof d.built_in==='object') return d.built_in;
+  }catch{}
+  return DEFAULTS;
+}
+function isParamNonDefault(key,val){
+  const b=baselineForPills()[key];
+  if(val===undefined||b===undefined)return false;
+  if(typeof val==='number'&&typeof b==='number'){
+    if(Number.isInteger(b)&&Number.isInteger(val))return val!==b;
+    return Math.abs(val-b)>1e-5;
+  }
+  return val!==b;
+}
+function refreshParamOverrides(){
+  for(const key of Object.keys(DEFAULTS)){
+    const el=document.getElementById('p-'+key);
+    const item=el&&el.closest('.param-item');
+    const pill=document.getElementById('pill-'+key);
+    if(!item)continue;
+    const val=typeof current[key]==='number'?current[key]:Number(el&&el.value);
+    const non=isParamNonDefault(key,val);
+    item.classList.toggle('param--override',non);
+    if(pill){
+      pill.classList.toggle('custom',non);
+      pill.classList.toggle('built-in',!non);
+      pill.textContent=non?'Custom':'Default';
+    }
+  }
+}
+
+let genParamsSaveTimer=null;
+function scheduleSaveParams(){
+  if(genParamsSaveTimer)clearTimeout(genParamsSaveTimer);
+  genParamsSaveTimer=setTimeout(()=>{genParamsSaveTimer=null;void saveParams();},550);
+}
+document.querySelectorAll('[id^="p-"]').forEach(el=>{
+  const key=el.id.slice(2);
+  const vEl=document.getElementById('v-'+key);
+  el.addEventListener('input',()=>{
+    const n=Number(el.value);
+    if(vEl)vEl.textContent=n;
+    current[key]=n;
+    refreshParamOverrides();
+    scheduleSaveParams();
+  });
+});
+
+function applyValues(vals){
+  for(const[key,val]of Object.entries(vals)){
+    const inp=document.getElementById('p-'+key);
+    const v=document.getElementById('v-'+key);
+    if(inp){inp.value=val;} if(v){v.textContent=val;} current[key]=val;
+  }
+  refreshParamOverrides();
+}
+function applyMainSlidersFromParamsFull(d){
+  if(!d||!d.effective||!d.param_keys)return;
+  const o={};
+  for(const k of d.param_keys){
+    const v=d.effective[k];
+    if(typeof v==='number'&&Number.isFinite(v)) o[k]=v;
+  }
+  applyValues(o);
+}
+async function syncGenerationSlidersFromServer(){
+  try{
+    const r=await fetchWithTimeout('/api/model-params-full',20000);
+    if(!r.ok)return;
+    const d=await r.json();
+    window.__paramsFull=d;
+    applyMainSlidersFromParamsFull(d);
+    refreshParamOverrides();
+  }catch{}
+}
+function saveParams(){
+  routerFetch('/api/model-params',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(current)})
+    .then(async (r)=>{
+      if(!r.ok){ await alertFailedSave(r,'Save generation'); return; }
+      const m=document.getElementById('saved-msg'); if(m){m.style.opacity=1; setTimeout(()=>m.style.opacity=0,2200);}
+      await syncGenerationSlidersFromServer();
+      await refreshModel();
+    });
+}
+function resetParams(){ applyValues(DEFAULTS); void saveParams(); }
+try{ refreshParamOverrides(); }catch(e){ console.error(e); }
+function toggleAdv(){
+  const d=document.getElementById('params-adv'), t=document.getElementById('adv-toggle');
+  const open=d.classList.toggle('open');
+  t.textContent=open?'- Advanced':'+ Advanced';
+}
+
+// ── Routing log SSE ─────────────────────────────────────────────────────────
+let lc=0,cc=0;
+const MAX_FOOTER_LOG_LINES=400;
+const FOOTER_MIN_H=130;
+const FOOTER_MAX_RATIO=.7;
+const FOOTER_COLLAPSED_H=46;
+let footerCollapsed=false;
+let footerExpandedHeight=260;
+
+function escHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function footerAtBottom(el){
+  if(!el)return true;
+  const gap=el.scrollHeight-el.scrollTop-el.clientHeight;
+  return gap<18;
+}
+function appendFooterLog(e){
+  const out=document.getElementById('fixedLogOutput');
+  if(!out||!e)return;
+  const stick=footerAtBottom(out);
+  const dest=(e.fallback?'fallback':(e.dest||'local')).toLowerCase();
+  const label=dest==='cloud'?'CLOUD':(dest==='fallback'?'FALLBACK':'LOCAL');
+  const line=document.createElement('div');
+  line.className='fixed-log-line';
+  const lm=e.local_model?(' \u2192 '+escHtml(e.local_model)):'';
+  line.innerHTML='['+escHtml(e.time||'--:--:--')+'] <span class="'+dest+'">'+label+'</span> - '+escHtml(e.reason||'')+lm;
+  out.appendChild(line);
+  while(out.children.length>MAX_FOOTER_LOG_LINES){out.removeChild(out.firstChild);}
+  const cnt=document.getElementById('fixedLogCount');
+  if(cnt)cnt.textContent=String(out.children.length);
+  if(stick)out.scrollTop=out.scrollHeight;
+}
+
+function clampFooterHeight(h){
+  const max=Math.max(FOOTER_MIN_H+20,Math.floor(window.innerHeight*FOOTER_MAX_RATIO));
+  return Math.max(FOOTER_MIN_H,Math.min(max,Math.floor(h)));
+}
+
+function updateFooterToggleBtn(){
+  const b=document.getElementById('fixedLogToggleBtn'); if(!b)return;
+  b.textContent=footerCollapsed?'Expand':'Collapse';
+  b.title=footerCollapsed?'Expand footer':'Collapse footer';
+}
+
+function applyFooterLayout(persist=true){
+  const f=document.getElementById('fixedLogFooter'); if(!f)return;
+  if(footerCollapsed){
+    f.classList.add('is-collapsed');
+    f.style.height=String(FOOTER_COLLAPSED_H)+'px';
+    document.body.style.paddingBottom=String(FOOTER_COLLAPSED_H+8)+'px';
+  } else {
+    f.classList.remove('is-collapsed');
+    const h=clampFooterHeight(footerExpandedHeight);
+    footerExpandedHeight=h;
+    f.style.height=String(h)+'px';
+    document.body.style.paddingBottom=String(h+16)+'px';
+  }
+  updateFooterToggleBtn();
+  if(persist){
+    try{
+      localStorage.setItem('dashboardFooterCollapsed',footerCollapsed?'1':'0');
+      localStorage.setItem('dashboardFooterHeightPx',String(footerExpandedHeight));
+    }catch{}
+  }
+}
+
+function toggleFooterCollapse(){
+  footerCollapsed=!footerCollapsed;
+  applyFooterLayout(true);
+}
+
+function setFooterHeight(h,persist=true){
+  footerExpandedHeight=clampFooterHeight(h);
+  if(!footerCollapsed)applyFooterLayout(persist);
+  else if(persist){try{localStorage.setItem('dashboardFooterHeightPx',String(footerExpandedHeight));}catch{}}
+}
+/** Same resize + collapse pattern as router/public/header-ui.html (log-footer). */
+function initFooterResizer(){
+  const f=document.getElementById('fixedLogFooter');
+  const h=document.getElementById('fixedLogResizer');
+  const t=document.getElementById('fixedLogToggleBtn');
+  if(!f||!h)return;
+  try{
+    const saved=parseInt(localStorage.getItem('dashboardFooterHeightPx')||'',10);
+    if(Number.isFinite(saved))footerExpandedHeight=clampFooterHeight(saved);
+    footerCollapsed=localStorage.getItem('dashboardFooterCollapsed')==='1';
+  }catch{}
+  applyFooterLayout(false);
+  var lastViewportW=window.innerWidth, lastViewportH=window.innerHeight;
+  if(t)t.addEventListener('click',toggleFooterCollapse);
+  let dragging=false,startY=0,startH=0;
+  const move=(y)=>{const d=startY-y; setFooterHeight(startH+d);};
+  const stop=()=>{dragging=false;document.body.style.userSelect='';};
+  h.addEventListener('mousedown',ev=>{dragging=true;startY=ev.clientY;startH=f.getBoundingClientRect().height;document.body.style.userSelect='none';});
+  window.addEventListener('mousemove',ev=>{if(dragging)move(ev.clientY);});
+  window.addEventListener('mouseup',stop);
+  h.addEventListener('touchstart',ev=>{if(!ev.touches||!ev.touches.length)return;dragging=true;startY=ev.touches[0].clientY;startH=f.getBoundingClientRect().height;},{passive:true});
+  window.addEventListener('touchmove',ev=>{if(dragging&&ev.touches&&ev.touches.length)move(ev.touches[0].clientY);},{passive:true});
+  window.addEventListener('touchend',stop);
+  var footerResizeRaf=0;
+  window.addEventListener('resize',function(){
+    if(footerResizeRaf)return;
+    footerResizeRaf=requestAnimationFrame(function(){
+      footerResizeRaf=0;
+      try{
+        var vw=window.innerWidth, vh=window.innerHeight;
+        if(vw===lastViewportW&&vh===lastViewportH)return;
+        lastViewportW=vw; lastViewportH=vh;
+        if(footerCollapsed)applyFooterLayout(false);
+        else setFooterHeight(f.getBoundingClientRect().height,false);
+      }catch(_){}
+    });
+  });
+}
+
+function statEsc(s){
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function addEntry(e){
+  try{
+    if(!e||typeof e!=='object')return;
+    document.getElementById('empty')?.remove();
+    const rawDest=e.dest!=null&&String(e.dest).trim()!==''?String(e.dest).trim():'local';
+    const destNorm=rawDest.toLowerCase()==='cloud'?'cloud':'local';
+    const dest=e.fallback?'fallback':destNorm;
+    const label=e.fallback?'FALLBACK':destNorm.toUpperCase();
+    const logContainer=document.getElementById('log');
+    if(logContainer){
+      const div=document.createElement('div');
+      div.className='entry '+dest;
+      div.innerHTML='<span class="etime">'+statEsc(e.time)+'</span><span class="badge '+dest+'">'+label+'</span><span class="reason">'+statEsc(e.reason)+'</span>';
+      logContainer.prepend(div);
+    }
+    if(!e.fallback){ if(destNorm==='local')lc++; else cc++; }
+    const cntLocal=document.getElementById('cnt-local');
+    const cntCloud=document.getElementById('cnt-cloud');
+    const cntTotal=document.getElementById('cnt-total');
+    if(cntLocal)cntLocal.textContent=lc;
+    if(cntCloud)cntCloud.textContent=cc;
+    if(cntTotal)cntTotal.textContent=lc+cc;
+    appendFooterLog(e);
+  }catch(_){}
+}
+var dashRefreshRunning=false;
+var dashRefreshNeedFull=false;
+function getPollIntervalSec(){
+  try{
+    const raw=document.body&&document.body.getAttribute('data-poll-interval');
+    const n=parseInt(String(raw||'10'),10);
+    return Number.isFinite(n)&&n>=3&&n<=120?n:10;
+  }catch(_){ return 10; }
+}
+function initDashboardPollTicker(){
+  let countdown=getPollIntervalSec();
+  setInterval(function(){
+    try{
+      if(dashRefreshRunning){
+        const np=document.getElementById('next-poll');
+        if(np) np.textContent='\u2026';
+        return;
+      }
+      countdown--;
+      if(countdown<=0){
+        countdown=getPollIntervalSec();
+        Promise.resolve(runCoalescedDashboardRefresh(false)).catch(function(){});
+      }
+      const np=document.getElementById('next-poll');
+      if(np) np.textContent=String(Math.max(0,countdown));
+    }catch(_){}
+  },1000);
+}
+/** Dedicated cadence for CPU/RAM/VRAM/GPU (faster than model poll); server serializes CPU samples and caches nvidia-smi ~5s. */
+var SYSTEM_STATS_POLL_MS=2000;
+function initSystemStatsPoller(){
+  try{
+    function tickStats(){
+      if(document.visibilityState!=='visible')return;
+      void refreshStats();
+    }
+    setTimeout(tickStats,500);
+    setInterval(tickStats,SYSTEM_STATS_POLL_MS);
+    document.addEventListener('visibilitychange',function(){
+      if(document.visibilityState==='visible')tickStats();
+    });
+  }catch(_){}
+}
+function hydrateLogEntriesBatched(raw){
+  try{
+    var list=Array.isArray(raw)?raw:[];
+    var i=0, CHUNK=25;
+    function step(){
+      var end=Math.min(i+CHUNK,list.length);
+      for(;i<end;i++){ try{ addEntry(list[i]); }catch(_){} }
+      if(i<list.length) requestAnimationFrame(step);
+    }
+    if(list.length) requestAnimationFrame(step);
+  }catch(_){}
+}
+initDashboardPollTicker();
+initSystemStatsPoller();
+try{ hydrateLogEntriesBatched((${jsonForInlineScript(log)}||[])); }catch(_){}
+const es=new EventSource('/events');
+es.onmessage=function(ev){
+  try{
+    addEntry(JSON.parse(ev.data));
+  }catch(_){}
+};
+es.onerror=function(){ const el=document.getElementById('rdot'); if(el) el.className='rdot err'; };
+es.onopen=function(){ const el=document.getElementById('rdot'); if(el&&el.classList.contains('err')) el.className='rdot'; };
+async function refreshRouteStats(){
+  try{
+    const r=await fetchWithTimeout('/api/stats',12000);
+    if(!r.ok)return;
+    const j=await r.json();
+    if(j.config&&j.config.routing_mode!=null)applyRoutingModeButton(j.config.routing_mode);
+    const lr=j.last_route;
+    const bar=document.getElementById('last-route-bar');
+    const tx=document.getElementById('last-route-text');
+    if(tx){
+      if(lr&&lr.dest){
+        const fb=lr.fallback;
+        if(bar){bar.className='last-route-bar '+(fb?'fallback':(lr.dest==='cloud'?'cloud':'local'));}
+        const dest=fb?('FALLBACK\u2192'+String(lr.dest).toUpperCase()):String(lr.dest).toUpperCase();
+        tx.innerHTML='<span class="lr-dest">'+dest+'</span> \u00b7 '+statEsc(lr.reason||'')+' \u00b7 <span style="opacity:.75">'+statEsc(lr.time||'')+'</span>';
+      } else {
+        if(bar)bar.className='last-route-bar local';
+        tx.textContent='';
+      }
+    }
+  }catch{}
+}
+
+var DASH_REFRESH_BUDGET_MS=52000;
+async function doRefresh(syncGenerationSliders){
+  const run=async function(){
+    if(syncGenerationSliders) void refreshStats();
+    await Promise.allSettled([refreshHealth(), refreshRouteStats()]);
+    await Promise.allSettled([refreshModel(), refreshOllamaModelList()]);
+    if(syncGenerationSliders) await syncGenerationSlidersFromServer();
+  };
+  try{
+    await Promise.race([
+      run(),
+      new Promise(function(_,rej){
+        setTimeout(function(){ rej(Object.assign(new Error('dashboard_refresh_timeout'),{name:'DashboardRefreshTimeout'})); },DASH_REFRESH_BUDGET_MS);
+      }),
+    ]);
+  }catch(e){
+    if(e&&e.name==='DashboardRefreshTimeout') console.warn('Claude Hybrid: dashboard refresh timed out; UI stays usable.');
+    else console.error(e);
+  }
+}
+var dashRefreshTailPasses=0;
+async function runCoalescedDashboardRefresh(forceFull){
+  if(forceFull) dashRefreshNeedFull=true;
+  if(dashRefreshRunning) return;
+  dashRefreshRunning=true;
+  try{
+    while(true){
+      const full=dashRefreshNeedFull;
+      dashRefreshNeedFull=false;
+      await doRefresh(full);
+      if(!dashRefreshNeedFull) break;
+    }
+    dashRefreshTailPasses=0;
+  }catch(e){
+    console.error(e);
+  }finally{
+    dashRefreshRunning=false;
+    if(dashRefreshNeedFull){
+      if(dashRefreshTailPasses<8){
+        dashRefreshTailPasses++;
+        Promise.resolve().then(function(){ void runCoalescedDashboardRefresh(false); });
+      }else{
+        dashRefreshNeedFull=false;
+        dashRefreshTailPasses=0;
+        console.warn('Claude Hybrid: stopped chained dashboard refresh (safety cap).');
+      }
+    }
+  }
+}
+void refreshHealth();
+function scheduleDashboardBootstrap(){
+  var go=function(){
+    void (async function(){
+      try{ await runCoalescedDashboardRefresh(true); }
+      catch(e){ console.error(e); void refreshHealth(); }
+    })();
+  };
+  if(typeof requestAnimationFrame==='function'){
+    requestAnimationFrame(function(){ requestAnimationFrame(function(){ setTimeout(go,0); }); });
+  }else{
+    setTimeout(go,0);
+  }
+}
+scheduleDashboardBootstrap();
+initFooterResizer();
+
+document.getElementById('routing-mode-btn')?.addEventListener('click',async function(){
+  var order=['hybrid','cloud','local'];
+  var i=order.indexOf(routingMode);
+  if(i<0)i=0;
+  var next=order[(i+1)%3];
+  try{
+    var r=await routerFetch('/api/router/routing-mode',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:next})});
+    if(!r.ok){
+      try{var j=await r.json();alert(j.error||j.hint||('HTTP '+r.status));}catch{alert('HTTP '+r.status);}
+      return;
+    }
+    var d=await r.json();
+    if(d&&d.mode)applyRoutingModeButton(d.mode);
+  }catch{alert('Could not change routing mode');}
+});
+
+document.getElementById('local-model-select')?.addEventListener('change',async (e)=>{
+  const v=e.target.value;
+  if(!v)return;
+  try{
+    const r=await routerFetch('/api/local-model',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:v})});
+    if(!r.ok){
+      try{const j=await r.json();alert(j.error||j.hint||('HTTP '+r.status));}catch{alert('HTTP '+r.status);}
+      await refreshOllamaModelList();
+      return;
+    }
+    await refreshModel();
+    await refreshOllamaModelList();
+    await syncGenerationSlidersFromServer();
+  }catch{
+    await refreshOllamaModelList();
+  }
+});
+
+let persistRoutingTimer=null;
+function schedulePersistRoutingSettings(){
+  if(persistRoutingTimer)clearTimeout(persistRoutingTimer);
+  persistRoutingTimer=setTimeout(()=>{persistRoutingTimer=null;void persistRoutingSettingsNow();},400);
+}
+async function persistRoutingSettingsNow(){
+  const cb=document.getElementById('smart-routing-cb');
+  const ps=document.getElementById('local-pool-select');
+  const fs=document.getElementById('fast-model-select');
+  const smart=cb?!!cb.checked:true;
+  const models=ps?Array.from(ps.selectedOptions).map(o=>o.value):[];
+  const fast_model=fs?String(fs.value||'').trim():'';
+  try{
+    const r=await routerFetch('/api/router/local-routing-config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({smart_routing:smart,models,fast_model})});
+    const msg=document.getElementById('pool-save-msg');
+    if(!r.ok){
+      try{const j=await r.json();alert(j.error||('HTTP '+r.status+' (admin token may be required)'));}catch{alert('HTTP '+r.status);}
+      return;
+    }
+    if(msg){msg.style.opacity=1;setTimeout(()=>{msg.style.opacity=0;},1800);}
+    await refreshOllamaModelList();
+    await refreshRouteStats();
+  }catch{
+    alert('Routing save failed');
+  }
+}
+document.getElementById('pool-chips-root')?.addEventListener('change',(e)=>{
+  const t=e.target;
+  if(t&&t.matches&&t.matches('input[type=checkbox]')) schedulePersistRoutingSettings();
+});
+document.getElementById('smart-routing-cb')?.addEventListener('change',()=>schedulePersistRoutingSettings());
+document.getElementById('fast-model-select')?.addEventListener('change',()=>schedulePersistRoutingSettings());
+
+document.getElementById('settings-modal-close')?.addEventListener('click',closeSettingsModal);
+document.getElementById('settings-modal')?.addEventListener('click',e=>{ if(e.target&&e.target.id==='settings-modal')closeSettingsModal(); });
+document.getElementById('params-files-modal-close')?.addEventListener('click',closeParamsFilesModal);
+document.getElementById('params-files-modal')?.addEventListener('click',e=>{ if(e.target&&e.target.id==='params-files-modal')closeParamsFilesModal(); });
+document.getElementById('tab-params-global')?.addEventListener('click',()=>switchParamsFilesTab('global'));
+document.getElementById('tab-params-per')?.addEventListener('click',()=>switchParamsFilesTab('per-model'));
+document.getElementById('params-files-reload')?.addEventListener('click',()=>{ void reloadParamsFilesActive(); });
+document.getElementById('params-files-save')?.addEventListener('click',()=>{ void saveParamsFilesActive(); });
+document.getElementById('save-global-settings-btn')?.addEventListener('click',()=>{ void saveGlobalFromSettingsModal(); });
+document.getElementById('save-per-model-btn')?.addEventListener('click',()=>savePerModelOverrides());
+document.getElementById('clear-per-model-btn')?.addEventListener('click',()=>clearPerModelOverrides());
+document.getElementById('model-info-close')?.addEventListener('click',closeModelInfoModal);
+document.getElementById('model-info-modal')?.addEventListener('click',e=>{ if(e.target&&e.target.id==='model-info-modal')closeModelInfoModal(); });
+document.getElementById('info-toggle-raw')?.addEventListener('click',()=>{
+  const pre=document.getElementById('model-info-pre');
+  const btn=document.getElementById('info-toggle-raw');
+  if(!pre||!btn)return;
+  infoRawVisible=!infoRawVisible;
+  pre.hidden=!infoRawVisible;
+  pre.textContent=JSON.stringify(window.__lastModelDetails||{},null,2);
+  btn.textContent=infoRawVisible?'Hide raw JSON':'Show raw JSON';
+});
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeModelInfoModal(); closeSettingsModal(); closeParamsFilesModal(); } });
+</script>
+</body>
+</html>`;
+}
+
+// ─── Main server ──────────────────────────────────────────────────────────────
+const server = http.createServer(async (req, res) => {
+  const reqPath = pathOnly(req.url);
+
+  if (req.method === 'GET' && reqPath === '/assets/dashboard-extra.css') {
+    const cssPath = path.join(CFG.resourcesDir, 'dashboard-extra.css');
+    if (!fs.existsSync(cssPath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+    try {
+      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+      res.end(fs.readFileSync(cssPath, 'utf8'));
+    } catch {
+      res.writeHead(500).end();
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/assets/ollama-dashboard-model-card.css') {
+    const cssPath = path.join(CFG.resourcesDir, 'ollama-dashboard-model-card.css');
+    if (!fs.existsSync(cssPath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+    try {
+      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+      res.end(fs.readFileSync(cssPath, 'utf8'));
+    } catch {
+      res.writeHead(500).end();
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/assets/ollama-logo.png') {
+    const logoPath = CFG.ollamaLogoCandidates.find(p => fs.existsSync(p));
+    if (!logoPath) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'logo not found' }));
+      return;
+    }
+    try {
+      const data = fs.readFileSync(logoPath);
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'public, max-age=3600',
+      });
+      res.end(data);
+    } catch {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'logo read failed' }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && (reqPath === '/assets/claude-code-icon.svg' || reqPath === '/assets/claude-icon.svg')) {
+    const iconPath = path.join(__dirname, 'public', 'claude-code-icon.svg');
+    if (!fs.existsSync(iconPath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+    try {
+      const data = fs.readFileSync(iconPath);
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Cache-Control': 'public, max-age=86400',
+      });
+      res.end(data);
+    } catch {
+      res.writeHead(500).end();
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/header-ui') {
+    try {
+      const uiPath = path.join(__dirname, 'public', 'header-ui.html');
+      const html = fs.readFileSync(uiPath, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'header ui unavailable' }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && (reqPath === '/' || reqPath === '')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(dashboardHTML(CFG));
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/events') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+    res.write('\n'); clients.add(res); req.on('close', () => clients.delete(res));
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/logs') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ logs: log }));
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/stats') {
+    const counters = metrics.snapshot();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      counters,
+      last_route: metrics.getLastRoute(),
+      config: {
+        listenHost: CFG.listenHost,
+        port: CFG.port,
+        local_model: CFG.local.model,
+        fast_model: CFG.local.fast_model || undefined,
+        local_models_pool: CFG.local.models,
+        smart_routing: CFG.local.smart_routing,
+        tokenThreshold: CFG.routing.tokenThreshold,
+        fileReadThreshold: CFG.routing.fileReadThreshold,
+        keywordCount: CFG.routing.keywords.length,
+        routing_mode: normalizeRoutingMode(CFG.routing.mode),
+      },
+    }));
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/router/routing-mode') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ mode: normalizeRoutingMode(CFG.routing.mode) }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/router/routing-mode') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const body = JSON.parse((await readBody(req)).toString() || '{}');
+      const next = saveRoutingMode(routerDir, body.mode);
+      CFG.routing.mode = next;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, mode: next }));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid body' }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/ollama-models') {
+    try {
+      const tags = await ollamaGet('/api/tags');
+      const ps = await ollamaGetPsWithRetry();
+      let models = normalizeOllamaTagList(tags);
+      if (tags !== null && models.length > 0) {
+        models = await enrichModelListWithContextCap(models);
+      }
+      const loaded_models = listPsModels(ps).map((row) => psModelId(row)).filter(Boolean);
+      const installedNames = models.map((m) => m.name);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        models,
+        loaded_models,
+        configured_model: CFG.local.model,
+        ollama_reachable: tags !== null,
+        pool: resolveLocalPool(CFG, installedNames),
+        smart_routing: CFG.local.smart_routing,
+      }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        models: [],
+        loaded_models: [],
+        configured_model: CFG.local.model,
+        ollama_reachable: false,
+        pool: [],
+        smart_routing: CFG.local.smart_routing,
+        error: e && e.message ? String(e.message) : 'ollama_models_failed',
+      }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/router/local-routing-config') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      model: CFG.local.model,
+      models: CFG.local.models,
+      smart_routing: CFG.local.smart_routing,
+      fast_model: CFG.local.fast_model || '',
+    }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/router/local-routing-config') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const body = JSON.parse((await readBody(req)).toString() || '{}');
+      saveLocalRoutingSettings(routerDir, {
+        models: Array.isArray(body.models) ? body.models : undefined,
+        smart_routing: typeof body.smart_routing === 'boolean' ? body.smart_routing : undefined,
+        fast_model: typeof body.fast_model === 'string' ? body.fast_model : undefined,
+      });
+      loadAndApply(CFG, routerDir);
+      normalizeLocalCfg();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        model: CFG.local.model,
+        models: CFG.local.models,
+        smart_routing: CFG.local.smart_routing,
+        fast_model: CFG.local.fast_model || '',
+      }));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/health') {
+    const HEALTH_BUDGET_MS = 3500;
+    let body;
+    try {
+      body = await Promise.race([
+        (async () => {
+          const [ps, ver] = await Promise.all([ollamaGetPsWithRetry(), getOllamaVersion()]);
+          const healthy = ps !== null;
+          return {
+            status: healthy ? 'healthy' : 'degraded',
+            ollama_version: ver,
+            uptime_seconds: healthy ? Math.floor(process.uptime()) : 0,
+          };
+        })(),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('health_timeout')), HEALTH_BUDGET_MS);
+        }),
+      ]);
+    } catch {
+      body = {
+        status: 'degraded',
+        ollama_version: ollamaVersionCache,
+        uptime_seconds: Math.floor(process.uptime()),
+      };
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body));
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/system-stats') {
+    try {
+      const cpu = await sampleCpuPercent();
+      const rawRam = 1 - os.freemem() / os.totalmem();
+      const ram = Number.isFinite(rawRam) ? Math.round(rawRam * 100) : null;
+      const nv = await Promise.race([
+        getNvidiaSmi().catch(() => null),
+        new Promise((r) => setTimeout(() => r(null), 5000)),
+      ]);
+      const vramPct =
+        nv && nv.vram_total_mb > 0
+          ? Math.round((nv.vram_used_mb / nv.vram_total_mb) * 100)
+          : null;
+      const gpuPct = nv && Number.isFinite(nv.gpu_util) ? Math.round(nv.gpu_util) : null;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        cpu: Number.isFinite(cpu) ? cpu : null,
+        ram,
+        vram: vramPct,
+        gpu: gpuPct,
+        vram_used_gb: nv ? (nv.vram_used_mb / 1024).toFixed(1) : null,
+        vram_total_gb: nv ? (nv.vram_total_mb / 1024).toFixed(1) : null,
+      }));
+    } catch (e) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        cpu: null,
+        ram: null,
+        vram: null,
+        gpu: null,
+        vram_used_gb: null,
+        vram_total_gb: null,
+        error: e && e.message ? String(e.message) : 'system_stats_failed',
+      }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/model-status') {
+    const ps = await ollamaGetPsWithRetry();
+    const psRows = listPsModels(ps);
+    const running = pickRunningModel(ps, CFG.local.model);
+    const showName = running ? psModelId(running) : CFG.local.model;
+    const show = await ollamaPost('/api/show', { model: showName });
+    const context_max = maxContextFromShow(show);
+    const context_allocated = contextAllocatedFromPsRow(running);
+    const modelPayload = running ? (() => {
+      const m = mergeModelDetailsFromShow(running, show);
+      return { ...m, details: enrichDetailsFromModelInfo(m.details || {}, show) };
+    })() : null;
+    const card_specs = buildCardSpecs(show, running);
+    const loaded_list = psRows.map((row) => ({
+      name: psModelId(row),
+      model: String(row.model || row.name || '').trim(),
+      size: toFiniteNumberLoose(row.size),
+      size_vram: toFiniteNumberLoose(row.size_vram),
+      digest: row.digest != null ? String(row.digest) : null,
+    })).filter((e) => e.name);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const effModel = running ? psModelId(running) : CFG.local.model;
+    const eff = effectiveParamsFor(effModel);
+    const configured_loaded = !!running;
+    res.end(JSON.stringify({
+      loaded: configured_loaded,
+      configured_loaded,
+      configured_model: CFG.local.model,
+      active_model: effModel,
+      loaded_list,
+      model: modelPayload,
+      card_specs,
+      context_max,
+      context_allocated,
+      request_num_ctx: eff.num_ctx,
+      capabilities: capabilityFlagsFromShow(show),
+    }));
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/model-params-full') {
+    const ps = await ollamaGetPsWithRetry();
+    const running = pickRunningModel(ps, CFG.local.model);
+    const activeModel = running ? psModelId(running) : CFG.local.model;
+    const patch = getPartialOverride(activeModel);
+    const effective = effectiveParamsFor(activeModel);
+    const builtIn = builtInParamsForModel(activeModel);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      built_in: builtIn,
+      preset_patch: matchPresetPatch(activeModel),
+      global: globalLayerMerged(activeModel),
+      global_sparse: modelParams,
+      active_model: activeModel,
+      loaded: !!running,
+      per_model_patch: patch,
+      effective,
+      param_keys: Object.keys(PARAM_DEFAULTS),
+    }));
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/router/model-details') {
+    let modelName = CFG.local.model;
+    const q = req.url.indexOf('?');
+    if (q !== -1) {
+      const sp = new URLSearchParams(req.url.slice(q + 1));
+      const m = sp.get('model');
+      if (m) modelName = m;
+    }
+    const show = await ollamaPost('/api/show', { model: modelName });
+    const eff = effectiveParamsFor(modelName);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      model: modelName,
+      summary: summarizeShow(show),
+      show,
+      global_options: globalLayerMerged(modelName),
+      per_model_patch: getPartialOverride(modelName),
+      router_request_options: eff,
+    }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/local-model') {
+    if (!requireAdmin(req, res)) return;
+    let body = {};
+    try {
+      body = JSON.parse((await readBody(req)).toString() || '{}');
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+      return;
+    }
+    const name = body.model;
+    if (!name || typeof name !== 'string' || !String(name).trim()) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'model name required' }));
+      return;
+    }
+    saveLocalModel(routerDir, name.trim());
+    loadAndApply(CFG, routerDir);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, model: CFG.local.model }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/router/model/stop') {
+    if (!requireAdmin(req, res)) return;
+    let body = {};
+    try { body = JSON.parse((await readBody(req)).toString() || '{}'); } catch { body = {}; }
+    const ps = await ollamaGetPsWithRetry();
+    const explicit = body.model && String(body.model).trim();
+    const matched = pickRunningModel(ps, CFG.local.model);
+    const fallback = matched || firstLoadedPsRow(ps);
+    const name = explicit || (fallback && psModelId(fallback)) || CFG.local.model;
+    await ollamaTouchModel(name, 0);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, model: name }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/router/model/start') {
+    if (!requireAdmin(req, res)) return;
+    const name = CFG.local.model;
+    await ollamaTouchModel(name, -1);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, model: name }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/router/model/restart') {
+    if (!requireAdmin(req, res)) return;
+    const ps = await ollamaGetPsWithRetry();
+    const matched = pickRunningModel(ps, CFG.local.model);
+    const row = matched || firstLoadedPsRow(ps);
+    if (row) {
+      await ollamaTouchModel(psModelId(row), 0);
+      await new Promise(r => setTimeout(r, 800));
+    }
+    await ollamaTouchModel(CFG.local.model, -1);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, model: CFG.local.model }));
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/model-params') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(globalLayerMerged(CFG.local.model)));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/model-params') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const body = JSON.parse((await readBody(req)).toString() || '{}');
+      const forModel = typeof body._for_model === 'string' && body._for_model.trim()
+        ? body._for_model.trim()
+        : CFG.local.model;
+      const { _for_model, ...rest } = body;
+      modelParams = sparseGlobalFromFullState(rest, forModel);
+      saveParams();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch { res.writeHead(400).end('{}'); }
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/model-params-per-model') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const body = JSON.parse((await readBody(req)).toString());
+      const model = body.model;
+      if (!model || typeof model !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'model required' }));
+        return;
+      }
+      const overrides = body.overrides;
+      if (overrides !== undefined && overrides !== null && (typeof overrides !== 'object' || Array.isArray(overrides))) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'overrides must be an object' }));
+        return;
+      }
+      const k = normModelKey(model);
+      if (!overrides || typeof overrides !== 'object' || Object.keys(overrides).length === 0) {
+        delete perModelParams[k];
+      } else {
+        const clean = {};
+        for (const key of Object.keys(PARAM_DEFAULTS)) {
+          if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+            const v = overrides[key];
+            if (typeof v === 'number' && Number.isFinite(v)) clean[key] = v;
+          }
+        }
+        perModelParams[k] = clean;
+      }
+      savePerModelParams();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && reqPath === '/api/router/model-params-raw') {
+    let which = 'global';
+    const q = req.url.indexOf('?');
+    if (q !== -1) {
+      const sp = new URLSearchParams(req.url.slice(q + 1));
+      if (sp.get('which') === 'per-model') which = 'per-model';
+    }
+    const pathRel = which === 'per-model' ? '.claude/model-params-per-model.json' : '.claude/model-params.json';
+    const content = readModelParamsFileRaw(which);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ which, path: pathRel, content }));
+    return;
+  }
+
+  if (req.method === 'POST' && reqPath === '/api/router/model-params-raw') {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const body = JSON.parse((await readBody(req)).toString() || '{}');
+      const which = body.which === 'per-model' ? 'per-model' : 'global';
+      if (typeof body.content !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'content must be a string' }));
+        return;
+      }
+      const parsed = JSON.parse(body.content);
+      if (which === 'global') {
+        modelParams = cleanGlobalParamsFromJson(parsed);
+        saveParams();
+      } else {
+        perModelParams = cleanPerModelFileFromJson(parsed);
+        savePerModelParams();
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: e && e.message ? String(e.message) : 'invalid json or save failed' }));
+    }
+    return;
+  }
+
+  // Ollama service control (Windows)
+  if (req.method === 'POST' && reqPath.startsWith('/api/service/')) {
+    if (!requireAdmin(req, res)) return;
+    const action = reqPath.split('/').pop();
+    const cmds = {
+      start:   'powershell -Command "Start-Process ollama -ArgumentList serve -WindowStyle Hidden"',
+      stop:    'taskkill /F /IM ollama.exe /T',
+      restart: 'taskkill /F /IM ollama.exe /T & timeout /t 2 /nobreak >nul & powershell -Command "Start-Process ollama -ArgumentList serve -WindowStyle Hidden"',
+    };
+    if (!cmds[action]) { res.writeHead(400).end('{}'); return; }
+    ollamaVersionCache = null; // reset so version re-fetches after restart
+    exec(cmds[action], { timeout: 10000 }, (err) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: !err, error: err?.message }));
+    });
+    return;
+  }
+
+  if (reqPath.includes('/models')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ data: [] }));
+    return;
+  }
+
+  if (!reqPath.includes('/messages')) { res.writeHead(404).end('{}'); return; }
+  if (req.method !== 'POST') { res.writeHead(405).end(); return; }
+
+  let rawBody, body;
+  try { rawBody = await readBody(req); body = JSON.parse(rawBody.toString()); }
+  catch { res.writeHead(400).end(JSON.stringify({ error: 'invalid json' })); return; }
+
+  metrics.bumpRequest();
+  const mode = normalizeRoutingMode(CFG.routing.mode);
+  let routeResult;
+  if (mode === 'cloud') {
+    routeResult = { dest: 'cloud', reason: 'routing mode: Claude only' };
+  } else if (mode === 'local') {
+    routeResult = { dest: 'local', reason: 'routing mode: Ollama only' };
+  } else {
+    routeResult = analyzeMessages(body, CFG.routing);
+  }
+  if (routeResult.dest === 'cloud') {
+    routeTo('cloud', routeResult.reason);
+    proxyCloud(req, rawBody, body, res);
+  } else {
+    proxyLocal(req, body, res, rawBody, routeResult);
+  }
+});
+
+async function ensureAutoDefaultModelsFromOllama() {
+  try {
+    if (process.env.ROUTER_SKIP_AUTO_DEFAULT_MODELS === '1' || /^true$/i.test(String(process.env.ROUTER_SKIP_AUTO_DEFAULT_MODELS || ''))) {
+      return;
+    }
+    const needModel = localModelUnsetInConfigFile(routerDir);
+    const needFast = localFastUnsetInConfigFile(routerDir);
+    if (!needModel && !needFast) return;
+
+    const tagsBody = await ollamaGet('/api/tags');
+    const models = normalizeOllamaTagList(tagsBody);
+    if (!models.length) {
+      if (needModel) {
+        console.warn('[hybrid-config] auto-default skipped: no Ollama tags (start Ollama or run ollama pull)');
+      }
+      return;
+    }
+
+    const fixedPrimary = needModel ? null : String(CFG.local.model || '').trim();
+    const { primary, fast } = pickAutoDefaultModels(models, { fixedPrimary: fixedPrimary || null });
+
+    if (needModel && primary) {
+      saveLocalModel(routerDir, primary);
+      CFG.local.model = primary;
+      console.log(`[hybrid-config] auto-set local.model → ${primary}`);
+    }
+
+    if (needFast && fast) {
+      const p = String(CFG.local.model || '').trim();
+      if (p && fast.toLowerCase() !== p.toLowerCase()) {
+        saveLocalRoutingSettings(routerDir, { fast_model: fast });
+        CFG.local.fast_model = fast;
+        console.log(`[hybrid-config] auto-set local.fast_model → ${fast}`);
+      }
+    }
+    normalizeLocalCfg();
+  } catch (e) {
+    console.warn('[hybrid-config] auto-default models:', e && e.message ? e.message : e);
+  }
+}
+
+async function startListening() {
+  await ensureAutoDefaultModelsFromOllama();
+  server.listen(CFG.port, CFG.listenHost, () => {
+    console.log('');
+    console.log('  Claude Hybrid Router');
+    console.log('  -----------------------------------------');
+    console.log(`  Dashboard  -> http://${CFG.listenHost}:${CFG.port}`);
+    console.log(`  Bind       -> ${CFG.listenHost}:${CFG.port}  (ROUTER_HOST=0.0.0.0 for LAN)`);
+    console.log(`  Local      -> http://${CFG.local.host}:${CFG.local.port}  (Gemma 4)`);
+    console.log(`  Cloud      -> https://${CFG.cloud.host}  (Claude Sonnet)`);
+    if (getAdminToken()) console.log('  Admin      -> ROUTER_ADMIN_TOKEN set (mutating /api/* require header)');
+    console.log('');
+  });
+}
+
+void startListening();

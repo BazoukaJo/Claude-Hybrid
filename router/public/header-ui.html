@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="en" class="dark" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Claude Hybrid - Header UI</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1f2630;
+      --text: #e6edf3;
+      --muted: #9aa4b2;
+      --border: rgba(255, 255, 255, 0.1);
+      --chip-bg: rgba(255, 255, 255, 0.04);
+      --chip-border: rgba(255, 255, 255, 0.14);
+      --good: #22c55e;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+    }
+
+    html.light {
+      --bg: #f3f6fb;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --text: #0f172a;
+      --muted: #475569;
+      --border: rgba(15, 23, 42, 0.14);
+      --chip-bg: rgba(15, 23, 42, 0.04);
+      --chip-border: rgba(15, 23, 42, 0.14);
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+      padding-bottom: 280px;
+    }
+
+    .dashboard-page-wide {
+      max-width: min(1280px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 0.75rem;
+    }
+
+    .dashboard-header-banner {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 0.5rem 0.65rem 0.6rem;
+      backdrop-filter: blur(8px);
+    }
+
+    .dashboard-header-bar {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      padding-right: 2.5rem;
+    }
+
+    .dashboard-header-start {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .dashboard-header-service-cluster,
+    .dashboard-header-start-lock {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      min-width: 0;
+    }
+
+    .dashboard-meta-logos {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      flex-shrink: 0;
+    }
+
+    .dashboard-meta-logo {
+      width: 1.55rem;
+      height: 1.55rem;
+      border-radius: 50%;
+      background: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      flex-shrink: 0;
+      color: #111;
+      font-size: 0.85rem;
+    }
+
+    .dashboard-meta-logo img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    .dashboard-header-health {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.78rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+
+    .dashboard-header-health.healthy {
+      color: #86efac;
+      background: color-mix(in srgb, var(--good) 18%, transparent);
+      border-color: color-mix(in srgb, var(--good) 35%, transparent);
+    }
+
+    .dashboard-header-health.degraded {
+      color: #fcd34d;
+      background: color-mix(in srgb, var(--warn) 17%, transparent);
+      border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+    }
+
+    .dashboard-header-health.error {
+      color: #fca5a5;
+      background: color-mix(in srgb, var(--bad) 18%, transparent);
+      border-color: color-mix(in srgb, var(--bad) 35%, transparent);
+    }
+
+    .service-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .service-controls .btn {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .dashboard-header-version-status {
+      margin-left: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      align-items: flex-end;
+      background: var(--chip-bg);
+      border: 1px solid var(--chip-border);
+      border-radius: 8px;
+      padding: 0.28rem 0.5rem;
+      max-width: 100%;
+    }
+
+    .dashboard-header-version-line {
+      margin: 0;
+      display: flex;
+      gap: 0.22rem;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .dashboard-header-meta-chip {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--chip-border);
+      background: var(--chip-bg);
+      color: var(--muted);
+      border-radius: 6px;
+      padding: 0.09rem 0.38rem;
+      font-size: 0.72rem;
+      line-height: 1.2;
+      font-weight: 600;
+    }
+
+    .dashboard-header-meta-chip--endpoint {
+      font-family: ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
+      letter-spacing: 0.02em;
+    }
+
+    .refresh-indicator {
+      width: 100%;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .refresh-indicator-cluster {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.28rem;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    .refresh-indicator-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.26rem;
+    }
+
+    .refresh-indicator .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--good);
+      animation: pulse 2s infinite;
+    }
+
+    .refresh-indicator.error .dot {
+      background: var(--bad);
+      animation: none;
+    }
+
+    .dashboard-header-status-line {
+      margin: 0;
+      font-size: 0.72rem;
+    }
+
+    .btn-refresh {
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .theme-toggle-btn {
+      position: absolute;
+      top: 0.05rem;
+      right: 0;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 8px;
+      border: 1px solid var(--chip-border);
+      background: var(--chip-bg);
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+
+    .theme-toggle-icon--sun { display: none; }
+    html.light .theme-toggle-icon--sun { display: inline-block; }
+    html.light .theme-toggle-icon--moon { display: none; }
+    html.dark .theme-toggle-icon--moon { display: inline-block; }
+
+    .dashboard-header-resources-strip {
+      margin-top: 0.35rem;
+    }
+
+    .compact-system-resources {
+      border: 1px solid var(--chip-border);
+      border-radius: 8px;
+      background: var(--surface-2);
+      padding: 0.25rem 0.45rem 0.28rem;
+    }
+
+    .compact-resources-head {
+      margin-bottom: 0.16rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.4rem;
+    }
+
+    .section-title-text { font-size: 0.86rem; font-weight: 600; }
+    .compact-metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.2rem;
+    }
+
+    @media (max-width: 880px) {
+      .compact-metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .dashboard-header-version-status { width: 100%; align-items: stretch; }
+      .dashboard-header-version-line,
+      .refresh-indicator-cluster { justify-content: flex-start; }
+      .refresh-indicator { justify-content: flex-start; }
+    }
+
+    .compact-metric {
+      border: 1px solid var(--chip-border);
+      background: var(--chip-bg);
+      border-radius: 6px;
+      padding: 0.14rem 0.28rem;
+    }
+
+    .metric-label-compact {
+      font-size: 0.67rem;
+      text-transform: uppercase;
+      color: var(--muted);
+      letter-spacing: 0.03em;
+      font-weight: 700;
+    }
+
+    .metric-value-compact {
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .timeline-canvas {
+      width: 100%;
+      height: 10px;
+      margin-top: 0.08rem;
+      border-radius: 3px;
+      display: block;
+      background: color-mix(in srgb, var(--text) 10%, transparent);
+    }
+
+    .log-panel {
+      border: 1px solid var(--border);
+      border-radius: 12px 12px 0 0;
+      background: var(--surface);
+      overflow: hidden;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .log-footer {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 999;
+      height: 260px;
+      min-height: 130px;
+      max-height: 70vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.28);
+      pointer-events: auto;
+    }
+
+    .log-resize-handle {
+      height: 12px;
+      cursor: ns-resize;
+      border-top: 1px solid var(--border);
+      border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+      border-radius: 12px 12px 0 0;
+      background: color-mix(in srgb, var(--chip-bg) 92%, transparent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      touch-action: none;
+    }
+
+    .log-resize-handle::before {
+      content: "";
+      width: 42px;
+      height: 3px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--muted) 70%, transparent);
+    }
+
+    .log-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.6rem;
+      padding: 0.55rem 0.7rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--chip-bg);
+    }
+
+    .log-panel-title {
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .log-panel-title .log-count {
+      font-weight: 500;
+      letter-spacing: normal;
+      text-transform: none;
+      color: var(--muted);
+    }
+
+    .log-panel-tools {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .log-toggle-btn {
+      border: 1px solid var(--chip-border);
+      background: var(--chip-bg);
+      color: var(--muted);
+      border-radius: 6px;
+      font-size: 0.7rem;
+      line-height: 1;
+      padding: 0.22rem 0.42rem;
+      cursor: pointer;
+    }
+
+    .log-output {
+      flex: 1 1 auto;
+      height: auto;
+      overflow: auto;
+      padding: 0.55rem 0.7rem;
+      font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+      font-size: 0.76rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      background: color-mix(in srgb, var(--surface-2) 88%, transparent);
+      color: var(--text);
+    }
+
+    .log-line {
+      margin: 0;
+      border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+      padding: 0.14rem 0;
+    }
+
+    .log-line:last-child {
+      border-bottom: none;
+    }
+
+    .log-dest-local { color: #4ade80; }
+    .log-dest-cloud { color: #93c5fd; }
+    .log-dest-fallback { color: #fbbf24; }
+
+    .log-footer.is-collapsed {
+      height: 46px !important;
+      min-height: 46px !important;
+    }
+
+    .log-footer.is-collapsed .log-resize-handle {
+      display: none;
+    }
+
+    .log-footer.is-collapsed .log-panel-head {
+      border-bottom: none;
+    }
+
+    .log-footer.is-collapsed .log-output {
+      display: none;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.45; }
+    }
+
+    .header-ui-preview-note {
+      font-size: 0.78rem;
+      line-height: 1.4;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--surface-2) 90%, var(--warn) 8%);
+      border: 1px solid color-mix(in srgb, var(--border) 85%, var(--warn) 15%);
+      border-radius: 10px;
+      padding: 0.45rem 0.65rem;
+      margin: 0 0 0.55rem;
+    }
+    .header-ui-preview-note a { color: #93c5fd; }
+    html.light .header-ui-preview-note a { color: #1d4ed8; }
+  </style>
+</head>
+<body>
+  <div class="dashboard-page-wide" id="dashboard-page">
+    <p class="header-ui-preview-note" role="note">
+      <strong>Preview</strong> — header, system strip, and log only. Open the <a href="/">full router dashboard</a> for models, routing, and generation parameters.
+    </p>
+    <header class="dashboard-header-banner" role="banner">
+      <div class="dashboard-header-bar w-100">
+        <div class="dashboard-header-start">
+          <div class="dashboard-header-service-cluster">
+            <div class="dashboard-header-start-lock">
+              <span class="dashboard-meta-logos" aria-hidden="true">
+                <span class="dashboard-meta-logo">
+                  <img src="/assets/ollama-logo.png" alt="">
+                </span>
+                <span class="dashboard-meta-logo">
+                  <img src="/assets/claude-code-icon.svg" alt="">
+                </span>
+              </span>
+              <div id="healthStatus" class="dashboard-header-health degraded" title="Whether the Ollama API responds at the configured host:port.">
+                <i class="fas fa-heartbeat" aria-hidden="true"></i>
+                <span id="healthText">Checking health...</span>
+              </div>
+            </div>
+            <div class="dashboard-header-ollama-toolbar">
+              <div class="service-controls">
+                <button id="startServiceBtn" class="btn btn-sm btn-success" type="button" title="Start Ollama service" onclick="startOllamaService()">
+                  <i class="fas fa-play" aria-hidden="true"></i>
+                </button>
+                <button id="stopServiceBtn" class="btn btn-sm btn-secondary" type="button" title="Stop Ollama service" onclick="stopOllamaService()">
+                  <i class="fas fa-stop" aria-hidden="true"></i>
+                </button>
+                <button id="restartServiceBtn" class="btn btn-sm btn-warning" type="button" title="Restart Ollama service" onclick="restartOllamaService()">
+                  <i class="fas fa-sync-alt" aria-hidden="true"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="dashboard-header-version-status" aria-label="Ollama version, API address, and refresh status">
+          <div class="dashboard-header-versions">
+            <p class="dashboard-header-version-line">
+              <span id="ollamaVersionChip" class="dashboard-header-meta-chip">Ollama</span>
+              <span id="endpointChip" class="dashboard-header-meta-chip dashboard-header-meta-chip--endpoint">localhost:11434</span>
+            </p>
+          </div>
+          <div class="dashboard-header-meta">
+            <div id="refreshIndicator" class="refresh-indicator" data-poll-interval="10">
+              <div class="refresh-indicator-cluster">
+                <div class="refresh-indicator-state">
+                  <div class="dot" aria-hidden="true"></div>
+                  <p class="dashboard-header-status-line">Updated <span id="lastUpdate">--:--:--</span><span aria-hidden="true"> · </span>next poll <span id="nextRefresh">10</span>s</p>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary btn-refresh" id="refreshDashboardBtn" title="Refresh dashboard now" onclick="refreshDashboardData()">
+                  <i class="fas fa-sync-alt"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button type="button" id="themeToggleBtn" class="theme-toggle-btn" title="Toggle light/dark theme" aria-label="Toggle theme">
+          <i class="fas fa-sun theme-toggle-icon--sun" aria-hidden="true"></i>
+          <i class="fas fa-moon theme-toggle-icon--moon" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <div class="dashboard-header-resources-strip w-100">
+        <div class="compact-system-resources mb-0">
+          <div class="compact-resources-head">
+            <div class="d-flex align-items-center gap-1">
+              <i class="fas fa-server text-primary section-icon"></i>
+              <span class="section-title-text">System Resources</span>
+            </div>
+          </div>
+
+          <div class="compact-metrics-grid">
+            <div class="compact-metric" title="CPU usage">
+              <div class="d-flex align-items-center justify-content-between">
+                <span class="metric-label-compact">CPU</span>
+                <span class="metric-value-compact" id="cpuPercent">--%</span>
+              </div>
+              <canvas class="timeline-canvas" id="cpuTimeline" width="200" height="12"></canvas>
+            </div>
+
+            <div class="compact-metric" title="RAM usage">
+              <div class="d-flex align-items-center justify-content-between">
+                <span class="metric-label-compact">RAM</span>
+                <span class="metric-value-compact" id="memoryPercent">--%</span>
+              </div>
+              <canvas class="timeline-canvas" id="memoryTimeline" width="200" height="12"></canvas>
+            </div>
+
+            <div class="compact-metric" title="VRAM usage">
+              <div class="d-flex align-items-center justify-content-between">
+                <span class="metric-label-compact">VRAM</span>
+                <span class="metric-value-compact" id="vramPercent">--%</span>
+              </div>
+              <canvas class="timeline-canvas" id="vramTimeline" width="200" height="12"></canvas>
+            </div>
+
+            <div class="compact-metric" title="GPU usage">
+              <div class="d-flex align-items-center justify-content-between">
+                <span class="metric-label-compact">GPU</span>
+                <span class="metric-value-compact" id="gpu3dPercent">--%</span>
+              </div>
+              <canvas class="timeline-canvas" id="gpu3dTimeline" width="200" height="12"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <footer id="logFooter" class="log-footer" aria-label="Router log output footer">
+      <div id="logResizeHandle" class="log-resize-handle" title="Drag to resize output window"></div>
+      <section class="log-panel">
+        <div class="log-panel-head">
+          <div class="log-panel-title">Router log <span class="log-count">(<span id="logCount">0</span>)</span></div>
+          <div class="log-panel-tools">
+            <button type="button" id="logFooterToggleBtn" class="log-toggle-btn" title="Collapse footer">Collapse</button>
+          </div>
+        </div>
+        <div id="logOutput" class="log-output"></div>
+      </section>
+    </footer>
+  </div>
+
+  <script>
+    (function initTheme() {
+      try {
+        const theme = localStorage.getItem("theme") || "dark";
+        const root = document.documentElement;
+        root.classList.remove("light", "dark");
+        root.classList.add(theme === "light" ? "light" : "dark");
+        root.setAttribute("data-bs-theme", theme === "light" ? "light" : "dark");
+      } catch (_) {}
+    })();
+
+    function fetchWithTimeout(url, ms, init) {
+      init = init || {};
+      const ac = new AbortController();
+      const t = setTimeout(function () {
+        try {
+          ac.abort();
+        } catch (_) {}
+      }, ms);
+      return fetch(url, Object.assign({}, init, { signal: ac.signal })).finally(function () {
+        clearTimeout(t);
+      });
+    }
+
+    document.getElementById("themeToggleBtn").addEventListener("click", () => {
+      const root = document.documentElement;
+      const next = root.classList.contains("dark") ? "light" : "dark";
+      root.classList.remove("light", "dark");
+      root.classList.add(next);
+      root.setAttribute("data-bs-theme", next);
+      try { localStorage.setItem("theme", next); } catch (_) {}
+    });
+
+    const timelineData = { cpu: [], memory: [], vram: [], gpu3d: [] };
+    const MAX_TIMELINE_POINTS = 60;
+    let refreshCountdown = 10;
+    const MAX_LOG_LINES = 400;
+    const LOG_FOOTER_MIN = 130;
+    const LOG_FOOTER_MAX_RATIO = 0.7;
+    const LOG_FOOTER_COLLAPSED = 46;
+    let footerCollapsed = false;
+    let footerExpandedHeight = 260;
+
+    function drawTimeline(canvas, data, color) {
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+      if (data.length < 2) return;
+
+      ctx.beginPath();
+      const stepX = width / Math.max(1, data.length - 1);
+      for (let i = 0; i < data.length; i++) {
+        const x = i * stepX;
+        const y = height - (Math.max(0, Math.min(100, data[i])) / 100) * height;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    async function updateSystemStats() {
+      try {
+        const response = await fetchWithTimeout("/api/system-stats", 12000);
+        if (!response.ok) throw new Error("stats failed");
+        const stats = await response.json();
+
+        const cpu = Number.isFinite(stats.cpu) ? stats.cpu : null;
+        const ram = Number.isFinite(stats.ram) ? stats.ram : null;
+        const vram = Number.isFinite(stats.vram) ? stats.vram : null;
+        const gpu = Number.isFinite(stats.gpu) ? stats.gpu : null;
+
+        document.getElementById("cpuPercent").textContent = cpu == null ? "--%" : `${cpu}%`;
+        document.getElementById("memoryPercent").textContent = ram == null ? "--%" : `${ram}%`;
+        document.getElementById("vramPercent").textContent = vram == null ? "--%" : `${vram}%`;
+        document.getElementById("gpu3dPercent").textContent = gpu == null ? "--%" : `${gpu}%`;
+
+        timelineData.cpu.push(cpu ?? 0);
+        timelineData.memory.push(ram ?? 0);
+        timelineData.vram.push(vram ?? 0);
+        timelineData.gpu3d.push(gpu ?? 0);
+        for (const key of Object.keys(timelineData)) {
+          if (timelineData[key].length > MAX_TIMELINE_POINTS) timelineData[key].shift();
+        }
+
+        drawTimeline(document.getElementById("cpuTimeline"), timelineData.cpu, "#3b82f6");
+        drawTimeline(document.getElementById("memoryTimeline"), timelineData.memory, "#22c55e");
+        drawTimeline(document.getElementById("vramTimeline"), timelineData.vram, "#06b6d4");
+        drawTimeline(document.getElementById("gpu3dTimeline"), timelineData.gpu3d, "#f59e0b");
+      } catch (_) {}
+    }
+
+    function setHealthState(kind, message) {
+      const health = document.getElementById("healthStatus");
+      health.classList.remove("healthy", "degraded", "error");
+      health.classList.add(kind);
+      document.getElementById("healthText").textContent = message;
+    }
+
+    async function updateHealthAndVersion() {
+      const refreshIndicator = document.getElementById("refreshIndicator");
+      try {
+        const response = await fetchWithTimeout("/api/health", 10000);
+        if (!response.ok) throw new Error("health failed");
+        const data = await response.json();
+        const state = data.status === "healthy" ? "healthy" : "degraded";
+        setHealthState(state, state === "healthy" ? "Healthy" : "Service unreachable");
+        refreshIndicator.classList.remove("error");
+
+        const vChip = document.getElementById("ollamaVersionChip");
+        if (data.ollama_version) vChip.textContent = `Ollama v${data.ollama_version}`;
+        else vChip.textContent = "Ollama";
+
+        const healthy = data.status === "healthy";
+        document.getElementById("startServiceBtn").disabled = healthy;
+        document.getElementById("stopServiceBtn").disabled = !healthy;
+        document.getElementById("restartServiceBtn").disabled = !healthy;
+      } catch (err) {
+        const msg =
+          err && err.name === "AbortError"
+            ? "Router not responding (timeout)"
+            : "Health check failed";
+        setHealthState("error", msg);
+        refreshIndicator.classList.add("error");
+      }
+    }
+
+    async function callService(action) {
+      const ids = ["startServiceBtn", "stopServiceBtn", "restartServiceBtn"];
+      ids.forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = true; });
+      try {
+        await fetch(`/api/service/${action}`, { method: "POST" });
+      } catch (_) {}
+      await new Promise((r) => setTimeout(r, 1200));
+      await updateHealthAndVersion();
+      await updateSystemStats();
+    }
+
+    function startOllamaService() { return callService("start"); }
+    function stopOllamaService() { return callService("stop"); }
+    function restartOllamaService() { return callService("restart"); }
+
+    function updateTimeAndCountdown() {
+      const now = new Date();
+      document.getElementById("lastUpdate").textContent = now.toLocaleTimeString();
+      refreshCountdown -= 1;
+      if (refreshCountdown <= 0) {
+        refreshCountdown = 10;
+        void refreshDashboardData();
+      }
+      document.getElementById("nextRefresh").textContent = String(refreshCountdown);
+    }
+
+    async function refreshDashboardData() {
+      refreshCountdown = 10;
+      const icon = document.querySelector("#refreshDashboardBtn i");
+      if (icon) icon.classList.add("fa-spin");
+      await updateHealthAndVersion();
+      if (icon) setTimeout(() => icon.classList.remove("fa-spin"), 250);
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function atLogBottom(el) {
+      if (!el) return true;
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      return gap < 18;
+    }
+
+    function appendLogLine(entry) {
+      const out = document.getElementById("logOutput");
+      if (!out || !entry) return;
+      const shouldStick = atLogBottom(out);
+      const destRaw = entry.fallback ? "fallback" : (entry.dest || "local");
+      const dest = String(destRaw).toLowerCase();
+      const time = escapeHtml(entry.time || "--:--:--");
+      const reason = escapeHtml(entry.reason || "");
+      const label = dest === "cloud" ? "CLOUD" : (dest === "fallback" ? "FALLBACK" : "LOCAL");
+      const cls = dest === "cloud" ? "log-dest-cloud" : (dest === "fallback" ? "log-dest-fallback" : "log-dest-local");
+
+      const line = document.createElement("div");
+      line.className = "log-line";
+      line.innerHTML = `[${time}] <span class="${cls}">${label}</span> - ${reason}`;
+      out.appendChild(line);
+
+      while (out.children.length > MAX_LOG_LINES) {
+        out.removeChild(out.firstChild);
+      }
+      document.getElementById("logCount").textContent = String(out.children.length);
+      if (shouldStick) out.scrollTop = out.scrollHeight;
+    }
+
+    async function loadExistingLogs() {
+      const out = document.getElementById("logOutput");
+      if (!out) return;
+      out.textContent = "";
+      try {
+        const resp = await fetch("/api/logs");
+        if (!resp.ok) throw new Error("logs unavailable");
+        const data = await resp.json();
+        const list = Array.isArray(data.logs) ? data.logs : [];
+        if (!list.length) {
+          const empty = document.createElement("div");
+          empty.className = "log-line";
+          empty.textContent = "No log entries yet.";
+          out.appendChild(empty);
+          document.getElementById("logCount").textContent = "0";
+          return;
+        }
+        let i = 0;
+        const CHUNK = 40;
+        function step() {
+          const end = Math.min(i + CHUNK, list.length);
+          for (; i < end; i++) appendLogLine(list[i]);
+          if (i < list.length) requestAnimationFrame(step);
+        }
+        requestAnimationFrame(step);
+      } catch (_) {
+        const fail = document.createElement("div");
+        fail.className = "log-line";
+        fail.textContent = "Failed to load logs.";
+        out.appendChild(fail);
+      }
+    }
+
+    function startLogStream() {
+      try {
+        const es = new EventSource("/events");
+        es.onmessage = (ev) => {
+          try {
+            appendLogLine(JSON.parse(ev.data));
+          } catch (_) {}
+        };
+      } catch (_) {}
+    }
+
+    function clampFooterHeight(value) {
+      const maxPx = Math.max(LOG_FOOTER_MIN + 20, Math.floor(window.innerHeight * LOG_FOOTER_MAX_RATIO));
+      return Math.max(LOG_FOOTER_MIN, Math.min(maxPx, Math.floor(value)));
+    }
+
+    function updateFooterToggleButton() {
+      const btn = document.getElementById("logFooterToggleBtn");
+      if (!btn) return;
+      btn.textContent = footerCollapsed ? "Expand" : "Collapse";
+      btn.title = footerCollapsed ? "Expand footer" : "Collapse footer";
+    }
+
+    function applyFooterLayout(persist = true) {
+      const footer = document.getElementById("logFooter");
+      if (!footer) return;
+      if (footerCollapsed) {
+        footer.classList.add("is-collapsed");
+        footer.style.height = `${LOG_FOOTER_COLLAPSED}px`;
+        document.body.style.paddingBottom = `${LOG_FOOTER_COLLAPSED + 8}px`;
+      } else {
+        footer.classList.remove("is-collapsed");
+        const h = clampFooterHeight(footerExpandedHeight);
+        footerExpandedHeight = h;
+        footer.style.height = `${h}px`;
+        document.body.style.paddingBottom = `${h + 16}px`;
+      }
+      updateFooterToggleButton();
+      if (persist) {
+        try {
+          localStorage.setItem("logFooterCollapsed", footerCollapsed ? "1" : "0");
+          localStorage.setItem("logFooterHeightPx", String(footerExpandedHeight));
+        } catch (_) {}
+      }
+    }
+
+    function toggleFooterCollapsed() {
+      footerCollapsed = !footerCollapsed;
+      applyFooterLayout(true);
+    }
+
+    function setFooterHeight(px, persist = true) {
+      footerExpandedHeight = clampFooterHeight(px);
+      if (!footerCollapsed) applyFooterLayout(persist);
+      else if (persist) {
+        try { localStorage.setItem("logFooterHeightPx", String(footerExpandedHeight)); } catch (_) {}
+      }
+    }
+
+    function initializeResizableFooter() {
+      const footer = document.getElementById("logFooter");
+      const handle = document.getElementById("logResizeHandle");
+      const toggleBtn = document.getElementById("logFooterToggleBtn");
+      if (!footer || !handle) return;
+
+      try {
+        const saved = Number.parseInt(localStorage.getItem("logFooterHeightPx") || "", 10);
+        if (Number.isFinite(saved)) footerExpandedHeight = clampFooterHeight(saved);
+        footerCollapsed = localStorage.getItem("logFooterCollapsed") === "1";
+      } catch (_) {}
+      applyFooterLayout(false);
+      let lastViewportW = window.innerWidth;
+      let lastViewportH = window.innerHeight;
+      if (toggleBtn) toggleBtn.addEventListener("click", toggleFooterCollapsed);
+
+      let dragging = false;
+      let startY = 0;
+      let startHeight = 0;
+
+      const onMove = (clientY) => {
+        const delta = startY - clientY;
+        setFooterHeight(startHeight + delta);
+      };
+
+      const stopDrag = () => {
+        dragging = false;
+        document.body.style.userSelect = "";
+      };
+
+      handle.addEventListener("mousedown", (e) => {
+        dragging = true;
+        startY = e.clientY;
+        startHeight = footer.getBoundingClientRect().height;
+        document.body.style.userSelect = "none";
+      });
+
+      window.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        onMove(e.clientY);
+      });
+
+      window.addEventListener("mouseup", stopDrag);
+
+      handle.addEventListener("touchstart", (e) => {
+        if (!e.touches || !e.touches.length) return;
+        dragging = true;
+        startY = e.touches[0].clientY;
+        startHeight = footer.getBoundingClientRect().height;
+      }, { passive: true });
+
+      window.addEventListener("touchmove", (e) => {
+        if (!dragging || !e.touches || !e.touches.length) return;
+        onMove(e.touches[0].clientY);
+      }, { passive: true });
+
+      window.addEventListener("touchend", stopDrag);
+
+      let footerResizeRaf = 0;
+      window.addEventListener("resize", () => {
+        if (footerResizeRaf) return;
+        footerResizeRaf = requestAnimationFrame(() => {
+          footerResizeRaf = 0;
+          const vw = window.innerWidth;
+          const vh = window.innerHeight;
+          if (vw === lastViewportW && vh === lastViewportH) return;
+          lastViewportW = vw;
+          lastViewportH = vh;
+          if (footerCollapsed) {
+            applyFooterLayout(false);
+          } else {
+            setFooterHeight(footer.getBoundingClientRect().height, false);
+          }
+        });
+      });
+    }
+
+    setInterval(updateTimeAndCountdown, 1000);
+    setInterval(function () {
+      if (document.visibilityState !== "visible") return;
+      void updateSystemStats();
+    }, 1000);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") void updateSystemStats();
+    });
+    function scheduleHeaderUiBoot() {
+      const go = () => {
+        void refreshDashboardData();
+        void loadExistingLogs();
+        startLogStream();
+        initializeResizableFooter();
+      };
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(go, 0)));
+      } else {
+        setTimeout(go, 0);
+      }
+    }
+    scheduleHeaderUiBoot();
+  </script>
+</body>
+</html>

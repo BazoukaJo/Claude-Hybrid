@@ -1,0 +1,31 @@
+{
+  "listen": {
+    "host": "127.0.0.1"
+  },
+  "local": {
+    "model": "VladimirGav/gemma4-26b-16GB-VRAM:latest",
+    "fast_model": "gemma4:e4b",
+    "smart_routing": true,
+    "models": []
+  },
+  "routing": {
+    "mode": "hybrid",
+    "tokenThreshold": 5000,
+    "fileReadThreshold": 7,
+    "keywords": [
+      "architect",
+      "security audit",
+      "audit",
+      "design pattern",
+      "race condition",
+      "performance optim",
+      "system design",
+      "data model",
+      "api design",
+      "from scratch",
+      "complex bug",
+      "multi-file",
+      "deep reason"
+    ]
+  }
+}
