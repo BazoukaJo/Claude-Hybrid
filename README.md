@@ -296,6 +296,10 @@ ollama ps
 nvidia-smi
 ```
 
+**Claude “frozen” / no reply**
+
+If the UI spins forever, the client is often waiting on the router while **Ollama or Anthropic** never sends another byte (stalled generation, dead TCP, or a huge first-token delay). The router now closes idle outbound sockets after **5 minutes** by default and returns **504** so the session can recover instead of hanging. Open **`http://127.0.0.1:8082/`** and check the footer log. For very slow local models, raise **`ROUTER_PROXY_SOCKET_MS`** (e.g. `900000`) or set **`ROUTER_PROXY_SOCKET_MS=0`** only for debugging (disables the safety timeout).
+
 **Tests**
 
 ```powershell

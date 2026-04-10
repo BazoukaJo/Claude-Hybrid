@@ -797,7 +797,13 @@
       const destRaw = entry.fallback ? "fallback" : (entry.dest || "local");
       const dest = String(destRaw).toLowerCase();
       const time = escapeHtml(entry.time || "--:--:--");
-      const reason = escapeHtml(entry.reason || "");
+      const msgRaw =
+        entry.reason != null && String(entry.reason).trim() !== ""
+          ? String(entry.reason)
+          : entry.value != null
+            ? String(entry.value)
+            : "";
+      const reason = escapeHtml(msgRaw);
       const label = dest === "cloud" ? "CLOUD" : (dest === "fallback" ? "FALLBACK" : "LOCAL");
       const cls = dest === "cloud" ? "log-dest-cloud" : (dest === "fallback" ? "log-dest-fallback" : "log-dest-local");
 
@@ -818,7 +824,14 @@
       if (!out) return;
       out.textContent = "";
       try {
-        const resp = await fetch("/api/logs");
+        const logsUrl = (() => {
+          try {
+            return new URL("/api/logs", window.location.href).href;
+          } catch {
+            return "/api/logs";
+          }
+        })();
+        const resp = await fetch(logsUrl);
         if (!resp.ok) throw new Error("logs unavailable");
         const data = await resp.json();
         const list = Array.isArray(data.logs) ? data.logs : [];
@@ -848,7 +861,14 @@
 
     function startLogStream() {
       try {
-        const es = new EventSource("/events");
+        const sseUrl = (() => {
+          try {
+            return new URL("/events", window.location.href).href;
+          } catch {
+            return "/events";
+          }
+        })();
+        const es = new EventSource(sseUrl);
         es.onmessage = (ev) => {
           try {
             appendLogLine(JSON.parse(ev.data));

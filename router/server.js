@@ -478,10 +478,11 @@ const LOG_MAX = 200,
   clients = new Set();
 let logSeq = 0;
 function pushLog(entry) {
+  const id = ++logSeq;
   const nextEntry =
     entry && typeof entry === "object"
-      ? { id: ++logSeq, ...entry }
-      : { id: ++logSeq, value: entry };
+      ? { ...entry, id }
+      : { id, value: entry };
   log.push(nextEntry);
   if (log.length > LOG_MAX) log.shift();
   const data = `data: ${JSON.stringify(nextEntry)}\n\n`;
@@ -492,6 +493,48 @@ function pushLog(entry) {
       clients.delete(c);
     }
   }
+}
+
+/** Milliseconds without bytes on the outbound proxy socket before abort (resets on traffic). Default 300000 (5 min). Set ROUTER_PROXY_SOCKET_MS=0 to disable. */
+function readProxySocketTimeoutMs() {
+  const raw = process.env.ROUTER_PROXY_SOCKET_MS;
+  if (raw != null && String(raw).trim() === "0") return 0;
+  if (raw == null || String(raw).trim() === "") return 300000;
+  const n = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return 300000;
+  return n;
+}
+const PROXY_SOCKET_IDLE_MS = readProxySocketTimeoutMs();
+
+function armProxyRequestTimeout(req, res, upstreamLabel) {
+  if (!PROXY_SOCKET_IDLE_MS) return;
+  req.setTimeout(PROXY_SOCKET_IDLE_MS);
+  req.on("timeout", () => {
+    try {
+      req.destroy();
+    } catch {}
+    try {
+      pushLog({
+        value: `${upstreamLabel}: socket idle ${PROXY_SOCKET_IDLE_MS}ms (ROUTER_PROXY_SOCKET_MS)`,
+      });
+    } catch {}
+    if (res.writableEnded) return;
+    try {
+      if (!res.headersSent) {
+        res.writeHead(504, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              type: "api_timeout",
+              message: `Router timed out waiting for ${upstreamLabel} (${PROXY_SOCKET_IDLE_MS}ms). Set ROUTER_PROXY_SOCKET_MS higher or 0 to disable.`,
+            },
+          }),
+        );
+      } else {
+        res.end();
+      }
+    } catch {}
+  });
 }
 
 // ─── Routing ──────────────────────────────────────────────────────────────────
@@ -1364,6 +1407,7 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
     if (!res.headersSent)
       res.writeHead(502).end(JSON.stringify({ error: "cloud error" }));
   });
+  armProxyRequestTimeout(req, res, "Anthropic API");
   req.write(cloudRawBody);
   req.end();
 }
@@ -1476,6 +1520,7 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
           );
         }
       });
+      armProxyRequestTimeout(req, res, "Ollama");
       req.write(openaiBody);
       req.end();
     } catch {
@@ -1923,17 +1968,21 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   display:flex;
   align-items:center;
   justify-content:space-between;
-  gap:8px;
+  gap:10px;
   padding:8px 12px;
   border-bottom:1px solid var(--border);
   background:var(--chip-bg);
+  flex-wrap:nowrap;
+  min-width:0;
 }
 .fixed-log-title{
+  flex:0 0 auto;
   font-size:11px;
   font-weight:700;
   letter-spacing:.06em;
   text-transform:uppercase;
   color:var(--text2);
+  white-space:nowrap;
 }
 .fixed-log-title .fixed-log-count{
   font-weight:500;
@@ -1941,18 +1990,38 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   text-transform:none;
   color:var(--text3);
 }
+.fixed-log-preview{
+  flex:1 1 auto;
+  min-width:0;
+  font-size:10px;
+  line-height:1.35;
+  color:var(--text3);
+  font-family:ui-monospace,"Cascadia Code","Consolas",monospace;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  min-height:14px;
+}
 .fixed-log-head-main{
   display:flex;
   align-items:center;
-  gap:12px;
+  gap:10px;
+  flex:1;
   min-width:0;
-  flex-wrap:wrap;
+  flex-wrap:nowrap;
 }
 .fixed-log-stats{
   display:flex;
   align-items:center;
   gap:8px;
-  flex-wrap:wrap;
+  flex:0 0 auto;
+  flex-wrap:nowrap;
+}
+@media (max-width:640px){
+  .fixed-log-head-main{flex-wrap:wrap;}
+  .fixed-log-preview{flex:1 1 100%;min-width:100%;order:3;}
+  .fixed-log-stats{order:2;}
+  .fixed-log-title{order:1;}
 }
 .fixed-log-stat{
   display:inline-flex;
@@ -1974,6 +2043,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
 .fixed-log-stat.cloud strong{color:var(--blue)}
 .fixed-log-stat.total strong{color:#a78bfa}
 .fixed-log-tools{
+  flex:0 0 auto;
   display:inline-flex;
   align-items:center;
   gap:8px;
@@ -2355,6 +2425,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
     <div class="fixed-log-head">
       <div class="fixed-log-head-main">
         <div class="fixed-log-title">Router log <span class="fixed-log-count">(<span id="fixedLogCount">0</span>)</span></div>
+        <div class="fixed-log-preview" id="fixedLogPreview" aria-live="polite" title="Latest log line (visible when the log panel is collapsed)"></div>
         <div class="fixed-log-stats" aria-label="Routing counters">
           <span class="fixed-log-stat local"><strong id="cnt-local">0</strong> Local</span>
           <span class="fixed-log-stat cloud"><strong id="cnt-cloud">0</strong> Cloud</span>
@@ -3739,8 +3810,15 @@ function appendFooterLog(e){
   const line=document.createElement('div');
   line.className='fixed-log-line';
   const lm=(e.local_model||e.cloud_model)?(' \u2192 '+escHtml(e.local_model||e.cloud_model)):'';
-  line.innerHTML='['+escHtml(e.time||'--:--:--')+'] <span class="'+dest+'">'+label+'</span> - '+escHtml(e.reason||'')+lm;
+  const msgRaw=e.reason!=null&&String(e.reason).trim()!==''?String(e.reason):(e.value!=null?String(e.value):'');
+  line.innerHTML='['+escHtml(e.time||'--:--:--')+'] <span class="'+dest+'">'+label+'</span> - '+escHtml(msgRaw)+lm;
   out.appendChild(line);
+  const prev=document.getElementById('fixedLogPreview');
+  if(prev){
+    const modelNote=e.local_model||e.cloud_model?(' \u2192 '+(e.local_model||e.cloud_model)):'';
+    const snippet=('['+(e.time||'')+'] '+msgRaw+modelNote).trim();
+    prev.textContent=snippet.length>140?snippet.slice(0,137)+'\u2026':snippet;
+  }
   while(out.children.length>MAX_FOOTER_LOG_LINES){out.removeChild(out.firstChild);}
   const cnt=document.getElementById('fixedLogCount');
   if(cnt)cnt.textContent=String(out.children.length);
@@ -3911,17 +3989,25 @@ function hydrateLogEntriesBatched(raw){
 }
 async function hydrateFooterLogsFromApi(){
   try{
-    const r=await fetchWithTimeout('/api/logs',12000);
-    if(!r.ok)return;
+    var logsUrl=(function(){try{return new URL('/api/logs',window.location.href).href;}catch(_){return '/api/logs';}})();
+    const r=await fetchWithTimeout(logsUrl,12000);
+    if(!r.ok)throw new Error('logs HTTP '+r.status);
     const j=await r.json();
     hydrateLogEntriesBatched(j&&Array.isArray(j.logs)?j.logs:[]);
-  }catch(_){ }
+  }catch(_){
+    var out=document.getElementById('fixedLogOutput');
+    var empty=document.getElementById('fixedLogEmpty');
+    if(out&&empty&&out.querySelectorAll('.fixed-log-line').length===0){
+      empty.textContent='Cannot reach /api/logs from this page. Open the dashboard at the same URL as ANTHROPIC_BASE_URL (e.g. http://127.0.0.1:8082/). If the log panel is collapsed, click Expand — or check the router terminal for [HH:MM:SS] lines.';
+    }
+  }
 }
 initDashboardPollTicker();
 initSystemStatsPoller();
 try{ hydrateLogEntriesBatched((${jsonForInlineScript(log)}||[])); }catch(_){}
 void hydrateFooterLogsFromApi();
-const es=new EventSource('/events');
+var sseUrl=(function(){try{return new URL('/events',window.location.href).href;}catch(_){return '/events';}})();
+const es=new EventSource(sseUrl);
 es.onmessage=function(ev){
   try{
     addEntry(JSON.parse(ev.data));
@@ -4230,7 +4316,9 @@ const server = http.createServer(async (req, res) => {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     });
+    if (typeof res.flushHeaders === "function") res.flushHeaders();
     res.write("\n");
     for (const entry of log) {
       try {
@@ -4999,6 +5087,17 @@ async function startListening() {
       console.log(
         "  Admin      -> ROUTER_ADMIN_TOKEN set (mutating /api/* require header)",
       );
+    console.log(
+      PROXY_SOCKET_IDLE_MS
+        ? `  Proxy idle -> ${PROXY_SOCKET_IDLE_MS}ms (ROUTER_PROXY_SOCKET_MS; 0=off)`
+        : "  Proxy idle -> off (ROUTER_PROXY_SOCKET_MS=0)",
+    );
+    pushLog({
+      time: ts(),
+      dest: "local",
+      reason: `Router ready — http://${CFG.listenHost}:${CFG.port} (dashboard log + SSE)`,
+      fallback: false,
+    });
     const idleMin = getIdleUnloadMinutes();
     if (idleMin)
       console.log(`  Idle       -> auto-unload after ${idleMin} min`);

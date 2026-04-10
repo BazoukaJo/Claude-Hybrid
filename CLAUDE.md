@@ -53,6 +53,7 @@ Root **`.gitignore`** may exclude `router/hybrid.config.json` and some `.claude/
 | `ROUTER_OLLAMA_PORT`              | Ollama HTTP port (default **11434**).                                                                         |
 | `ROUTER_HYBRID_CONFIG`            | Absolute path to an alternate **`hybrid.config.json`** (see **`router/lib/hybrid-config.js`**).                 |
 | `ROUTER_ADMIN_TOKEN`              | If set, mutating **POST** routes require **`X-Router-Token`** or **`Authorization: Bearer`**.                  |
+| `ROUTER_PROXY_SOCKET_MS`          | Outbound **Anthropic / Ollama** proxy socket idle timeout (ms); resets when bytes move. Default **300000** (5 min). Set **0** to disable (can hang clients if upstream stalls). |
 | `ROUTER_SKIP_AUTO_DEFAULT_MODELS` | Skip startup auto-picking for `local.model` / `local.fast_model` when they are empty in config.                |
 
 **Claude Code client env** (via `~/.claude/settings.json` and IDE terminal blocks) is updated by **`npm run merge-env`**: **`ANTHROPIC_BASE_URL`**, **`ENABLE_TOOL_SEARCH`**, and optionally **`ANTHROPIC_API_KEY`** if that variable is set in the shell when merge runs. Remove stored API key: **`ROUTER_REMOVE_CLAUDE_API_KEY=1`** with merge (see **`README.md`** quota section).
