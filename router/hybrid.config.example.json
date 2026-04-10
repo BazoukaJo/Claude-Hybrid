@@ -27,5 +27,18 @@
       "multi-file",
       "deep reason"
     ]
+  },
+  "privacy": {
+    "cloud_redaction": {
+      "enabled": false,
+      "redact_tool_results": true,
+      "redact_paths": true,
+      "redact_urls": true,
+      "redact_emails": true,
+      "redact_secrets": true,
+      "redact_ids": true,
+      "redact_identifiers": false,
+      "custom_terms": []
+    }
   }
 }

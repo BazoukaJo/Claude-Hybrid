@@ -449,12 +449,8 @@ html.hybrid-dashboard.light .capability-icon:hover {
   width: 100%;
 }
 
-.hybrid-dashboard .hybrid-model-actions-5 {
+.hybrid-dashboard .hybrid-model-actions-2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.hybrid-dashboard .hybrid-model-actions-5 > .btn:nth-child(5) {
-  grid-column: 1 / -1;
 }
 
 .hybrid-dashboard .model-actions .btn {

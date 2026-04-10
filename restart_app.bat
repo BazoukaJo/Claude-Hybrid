@@ -4,18 +4,19 @@ cd /d "%~dp0"
 if "%ROUTER_PORT%"=="" set "ROUTER_PORT=8082"
 
 call "%~dp0stop_app.bat"
+set "STOP_EC=!ERRORLEVEL!"
 call :wait_port_free
 if errorlevel 1 (
   echo.
-  echo Restart failed: port %ROUTER_PORT% is still in use. Close the router or the app using that port, then try again.
-  pause
+  echo Restart failed: port %ROUTER_PORT% is still in use after stop ^(stop_app exit !STOP_EC!^).
+  echo Close the router or the app using that port, then try again.
   exit /b 1
 )
 
 call "%~dp0start_app.bat"
 exit /b !ERRORLEVEL!
 
-REM ?? Wait until netstat shows no LISTENER on ROUTER_PORT (handles slow socket release)
+REM Wait until netstat shows no LISTENER on ROUTER_PORT (handles slow socket release)
 :wait_port_free
 set "N=0"
 :wait_loop

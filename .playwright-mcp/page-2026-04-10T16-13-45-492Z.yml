@@ -1,0 +1,157 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - generic [ref=e6]:
+            - img "Ollama" [ref=e8]
+            - img "Claude Code" [ref=e10]
+          - generic [ref=e11]: ClaudeLlama
+          - generic [ref=e14]: Healthy · 1m
+        - generic [ref=e15]:
+          - generic [ref=e16]:
+            - generic [ref=e17]: Ollama v0.20.4
+            - generic [ref=e18]: localhost:11434
+            - generic [ref=e19]: 127.0.0.1:8082
+          - generic [ref=e20]:
+            - generic [ref=e22]: Updated 12:13:45 · next poll 10s
+            - button "↻" [ref=e23] [cursor=pointer]
+        - button "☾" [ref=e24] [cursor=pointer]:
+          - generic [ref=e25]: ☾
+      - region "System load" [ref=e26]:
+        - generic [ref=e27]:
+          - generic [ref=e29]: System load
+          - generic [ref=e30]:
+            - generic [ref=e32]:
+              - generic [ref=e33]: CPU
+              - generic [ref=e34]: 16%
+            - generic [ref=e37]:
+              - generic [ref=e38]: RAM
+              - generic [ref=e39]: 40%
+            - generic [ref=e42]:
+              - generic [ref=e43]: VRAM
+              - generic [ref=e44]: 95%
+            - generic [ref=e47]:
+              - generic [ref=e48]: GPU
+              - generic [ref=e49]: 100%
+  - generic [ref=e51]:
+    - region "Local-first routing" [ref=e52]:
+      - strong [ref=e53]: Local-first, cloud when it matters.
+      - text: Most work goes to your Ollama pool; smart routing picks a model per task. Very large prompts, heavy tool output this turn, or routing keywords still use Claude so quality stays high. Use
+      - strong [ref=e54]: Speed assist model
+      - text: below for a smaller tag on brief prompts (e.g. “give a concise summary”). Pool, smart routing, and speed assist save automatically when you change them.
+    - region "Models & routing" [ref=e55]:
+      - group "API routing mode" [ref=e56]:
+        - generic [ref=e57]:
+          - generic [ref=e58]: API routing mode
+          - generic [ref=e59]: Hybrid follows your thresholds and keywords; Claude only or Ollama only force every request that way. Click to cycle modes.
+        - group "Choose API routing mode" [ref=e60]:
+          - button [ref=e61] [cursor=pointer]
+          - button [ref=e62] [cursor=pointer]
+          - button [ref=e63] [cursor=pointer]
+      - heading "Ollama runtime" [level=3] [ref=e64]
+      - paragraph [ref=e65]: Loaded models are highlighted. This runtime list also shows every pooled model so you can inspect details or edit settings even when a tag is not currently in VRAM. Loaded models auto-unload after idle time.
+      - group "Load default model in Ollama" [ref=e66]:
+        - button "▶ Start default" [ref=e67] [cursor=pointer]
+      - list "Ollama runtime"
+      - heading "Models & routing" [level=2] [ref=e68]
+      - generic [ref=e69]:
+        - generic [ref=e70]:
+          - generic [ref=e71]: Default model
+          - combobox "Default model" [ref=e72]
+        - generic [ref=e73] [cursor=pointer]:
+          - checkbox "Smart routing" [checked] [ref=e74]
+          - text: Smart routing
+        - generic [ref=e75]: ✓ Saved
+      - generic [ref=e76]:
+        - generic [ref=e77]:
+          - generic [ref=e78]: Speed assist model
+          - combobox "Speed assist model" [ref=e79]:
+            - option "(None)" [selected]
+        - paragraph [ref=e80]: Smaller Ollama tag preferred for speed-style prompts. Leave (None) to disable. Same pool / smart routing rules apply.
+      - generic [ref=e81]:
+        - generic [ref=e82]:
+          - generic [ref=e83] [cursor=pointer]: Pool (optional)
+          - paragraph [ref=e84]: Pick which installed models local routing may use. Leave all unchecked to allow the full library.
+          - status
+          - group "Pool (optional)" [ref=e85]
+        - listbox [ref=e86]
+    - region "Generation parameters" [ref=e87]:
+      - generic [ref=e88]:
+        - heading "Generation parameters" [level=2] [ref=e89]
+        - generic [ref=e90]:
+          - button "Edit config (JSON)…" [ref=e91] [cursor=pointer]
+          - button "Generation settings…" [ref=e92] [cursor=pointer]
+      - generic [ref=e93]:
+        - generic [ref=e94]:
+          - generic [ref=e95]: Sliders
+          - generic [ref=e96]:
+            - generic [ref=e97]: Saved ✓
+            - button "Reset defaults" [ref=e98] [cursor=pointer]
+        - generic [ref=e99]:
+          - generic [ref=e100]:
+            - generic [ref=e101]:
+              - generic [ref=e102]: Temperature
+              - generic [ref=e103]: Custom
+              - generic [ref=e104]: "0.42"
+            - slider [ref=e105] [cursor=pointer]: "0.4"
+            - generic [ref=e106]: Randomness. Lower = focused.
+          - generic [ref=e107]:
+            - generic [ref=e108]:
+              - generic [ref=e109]: Top P
+              - generic [ref=e110]: Custom
+              - generic [ref=e111]: "0.92"
+            - slider [ref=e112] [cursor=pointer]: "0.9"
+            - generic [ref=e113]: Nucleus sampling cutoff.
+          - generic [ref=e114]:
+            - generic [ref=e115]:
+              - generic [ref=e116]: Top K
+              - generic [ref=e117]: Custom
+              - generic [ref=e118]: "48"
+            - slider [ref=e119] [cursor=pointer]: "48"
+            - generic [ref=e120]: Vocabulary pool size.
+          - generic [ref=e121]:
+            - generic [ref=e122]:
+              - generic [ref=e123]: Context length
+              - generic [ref=e124]: Custom
+            - spinbutton [ref=e125]: "8192"
+            - generic [ref=e126]: Tokens in context window. Affects VRAM.
+          - generic [ref=e127]:
+            - generic [ref=e128]:
+              - generic [ref=e129]: Seed
+              - generic [ref=e130]: Default
+            - spinbutton [ref=e131]: "0"
+            - generic [ref=e132]: 0 = random. Fixed = reproducible.
+          - generic [ref=e133]:
+            - generic [ref=e134]:
+              - generic [ref=e135]: Repeat penalty
+              - generic [ref=e136]: Default
+              - generic [ref=e137]: "1.1"
+            - slider [ref=e138] [cursor=pointer]: "1.1"
+            - generic [ref=e139]: Discourages repetition. 1.0 = off.
+        - generic [ref=e140] [cursor=pointer]: + Advanced
+    - contentinfo "Support" [ref=e141]:
+      - generic [ref=e142]:
+        - generic [ref=e143]: Thanks for helping this tool advance.
+        - link "Buy Me a Coffee" [ref=e144] [cursor=pointer]:
+          - /url: https://buymeacoffee.com/bazoukajo
+  - contentinfo "Output window footer" [ref=e145]:
+    - generic "Drag to resize output window" [ref=e146]
+    - generic [ref=e147]:
+      - generic [ref=e148]:
+        - generic [ref=e149]:
+          - generic [ref=e150]:
+            - text: Router log
+            - generic [ref=e151]: (0)
+          - generic "Routing counters" [ref=e152]:
+            - generic [ref=e153]:
+              - strong [ref=e154]: "0"
+              - text: Local
+            - generic [ref=e155]:
+              - strong [ref=e156]: "0"
+              - text: Cloud
+            - generic [ref=e157]:
+              - strong [ref=e158]: "0"
+              - text: Total
+        - button "Collapse" [ref=e160] [cursor=pointer]
+      - generic [ref=e162]: No routing events yet.

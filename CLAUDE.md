@@ -22,20 +22,20 @@ router/server.js  (Node proxy; no npm deps for the router itself)
     +-- cloud  --> api.anthropic.com
 ```
 
-The proxy maps Anthropic message/tool format to OpenAI-style bodies for Ollama and can fall back to cloud if the local path fails.
+The proxy maps Anthropic message/tool format to OpenAI-style bodies for Ollama, can fall back across providers when allowed by routing mode, and optionally redacts cloud-bound payloads before forwarding to Anthropic.
 
 ## UI surfaces
 
-| URL | Content |
-|-----|---------|
-| `http://127.0.0.1:8082/` | Main dashboard: local-first explainer, default model, pool / smart routing / speed-assist (auto-save on change), Ollama runtime, installed library (disk size + max context), generation sliders (auto-save), **Settings** / **Info** modals, supporter footer, fixed router log. Content width capped (~1280px). |
-| `/header-ui` | Preview: header, system metrics, log — links to `/` for full controls. |
-| `/events` | SSE stream of routing decisions. |
+| URL                      | Content                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `http://127.0.0.1:8082/` | Main dashboard: routing-mode controls, local-first explainer, default model, pool / smart routing / speed-assist (auto-save on change), Ollama runtime, installed library (disk size + max context), generation sliders (auto-save), **Settings** / **Info** modals, supporter footer, and fixed footer router log. Content width capped (~1280px). |
+| `/header-ui`             | Preview: header, system metrics, log — links to `/` for full controls.                                                                                                                                                                                                                                                                              |
+| `/events`                | SSE stream of routing decisions. New clients immediately receive the current in-memory backlog.                                                                                                                                                                                                                                                     |
 
 ## Config files
 
-- **`router/hybrid.config.json`** — Optional; created from **`router/hybrid.config.example.json`** by `setup.ps1` if missing. Watcher reloads on save.  
-  Relevant keys: `listen.host`, **`local.model`**, **`local.models`**, **`local.smart_routing`**, **`local.fast_model`** (dashboard updates write the file automatically), **`routing.tokenThreshold`**, **`routing.fileReadThreshold`**, **`routing.keywords`**.  
+- **`router/hybrid.config.json`** — Optional; created from **`router/hybrid.config.example.json`** by `setup.ps1` if missing. Watcher reloads on save.
+  Relevant keys: `listen.host`, **`local.model`**, **`local.models`**, **`local.smart_routing`**, **`local.fast_model`**, **`routing.mode`**, **`routing.tokenThreshold`**, **`routing.fileReadThreshold`**, **`routing.keywords`**, and **`privacy.cloud_redaction.*`**. Dashboard updates write the local-routing and routing-mode keys automatically.
   If **`local.model`** or **`local.fast_model`** is **missing or empty**, the router **on startup** reads **`GET /api/tags`** and writes sensible defaults into the file (skip with **`ROUTER_SKIP_AUTO_DEFAULT_MODELS=1`**).
 - **`.claude/model-params.json`** — Global generation defaults (dashboard **Save** / **Generation settings**).
 - **`.claude/model-params-per-model.json`** — Per-model overrides.
@@ -44,11 +44,12 @@ Root **`.gitignore`** may exclude `router/hybrid.config.json` and some `.claude/
 
 ## Environment variables
 
-| Variable | Purpose |
-|----------|---------|
-| `ROUTER_HOST` | Bind address; default **`127.0.0.1`**. Use **`0.0.0.0`** only with care (LAN + consider `ROUTER_ADMIN_TOKEN`). |
-| `ROUTER_PORT` / `PORT` | Listen port; default **8082**. |
-| `ROUTER_ADMIN_TOKEN` | If set, mutating **POST** routes require **`X-Router-Token`** or **`Authorization: Bearer`**. |
+| Variable                          | Purpose                                                                                                        |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `ROUTER_HOST`                     | Bind address; default **`127.0.0.1`**. Use **`0.0.0.0`** only with care (LAN + consider `ROUTER_ADMIN_TOKEN`). |
+| `ROUTER_PORT` / `PORT`            | Listen port; default **8082**.                                                                                 |
+| `ROUTER_ADMIN_TOKEN`              | If set, mutating **POST** routes require **`X-Router-Token`** or **`Authorization: Bearer`**.                  |
+| `ROUTER_SKIP_AUTO_DEFAULT_MODELS` | Skip startup auto-picking for `local.model` / `local.fast_model` when they are empty in config.                |
 
 ## Routing rules (high level)
 
@@ -58,13 +59,27 @@ Root **`.gitignore`** may exclude `router/hybrid.config.json` and some `.claude/
 - More than `routing.fileReadThreshold` **`tool_result`** blocks in the **latest user message** only
 - Last user message contains any `routing.keywords` entry
 
-**Else local.**  
-With **`local.smart_routing`** and multiple models in the pool, **`router/lib/local-model-picker.js`** scores by vision/tools, size, “heavy” vs “brief” prompts, optional **`local.fast_model`**, and **tool results in the latest user message** (Claude Code always sends tools in the schema; the picker uses real `tool_result` volume and mid-turn heuristics, not “tools array present” alone).
+**Else local.**
+With **`local.smart_routing`** and multiple models in the pool, **`router/lib/local-model-picker.js`** scores by vision/tools, size, “heavy” vs “brief” prompts, optional **`local.fast_model`**, and **tool results in the latest user message**. Broad keywords like `audit` are guarded to avoid needless cloud escalation for short generic prompts. Cloud-bound requests preserve the selected Claude model.
+
+## Privacy redaction
+
+The router supports an **opt-in, cloud-only** privacy layer under **`privacy.cloud_redaction`** in `router/hybrid.config.json`.
+
+- `enabled` turns redaction on for requests forwarded to Anthropic
+- `redact_tool_results` applies the same pass to tool-result payloads
+- `redact_paths`, `redact_urls`, `redact_emails`, `redact_secrets`, and `redact_ids` mask common sensitive values
+- `custom_terms` lets users replace project-specific names or internal codenames
+- `redact_identifiers` is a stronger mode that pseudonymizes camelCase / PascalCase / snake_case identifiers
+
+The redactor currently lives in **`router/lib/privacy-redactor.js`**. `/api/stats` exposes whether the feature is enabled and whether tool-result or identifier redaction is active, but it does not expose the custom terms themselves.
 
 ## API touches agents often care about
 
-- `GET /api/health`, `/api/model-status`, `/api/ollama-models` (tags include optional `context_max` from `/api/show`), `/api/stats`
+- `GET /api/health`, `/api/model-status`, `/api/ollama-models` (tags include optional `context_max` from `/api/show`), `/api/stats`, `/api/logs`
+- `GET /events` seeds the current log backlog and then streams new route events
 - `GET/POST /api/router/local-routing-config` — pool (`local.models`), `smart_routing`, `fast_model`
+- `GET/POST /api/router/routing-mode` — current `routing.mode`
 - `POST /api/local-model` — set default model name
 - `GET/POST /api/model-params`, `POST /api/model-params-per-model`, `GET /api/model-params-full`
 
@@ -94,6 +109,8 @@ claude
 node scripts\merge-claude-hybrid-env.js
 ```
 
+The dashboard footer log hydrates from `/api/logs` and then follows `/events`, so an empty footer after refresh is a bug rather than expected behavior.
+
 ## Tests
 
 ```powershell
@@ -103,6 +120,8 @@ npm run test:all
 .\tests\validate-routing.ps1   # live router + Ollama: probes local, keyword cloud, heavy tool-turn (hybrid)
 .\tests\run-all.ps1              # Node tests + validate-routing.ps1 when :8082 is up
 ```
+
+Recent coverage additions include privacy redaction unit tests and a router HTTP test that validates default-model switching does not surface a false error while the new Ollama model is still loading.
 
 ## Agent discipline
 

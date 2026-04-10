@@ -1,13 +1,13 @@
-'use strict';
+"use strict";
 // ─────────────────────────────────────────────────────────────────────────────
-// Claude Hybrid Router  —  http://localhost:8082
+// ClaudeLlama Router  —  http://localhost:8082
 // ─────────────────────────────────────────────────────────────────────────────
-const http  = require('http');
-const https = require('https');
-const fs    = require('fs');
-const path  = require('path');
-const os    = require('os');
-const { exec, execFile } = require('child_process');
+const http = require("http");
+const https = require("https");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const { exec, execFile } = require("child_process");
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 const {
@@ -17,9 +17,12 @@ const {
   listPsModels,
   psModelId,
   maxContextFromShow,
-} = require('./lib/model-utils');
-const { analyzeMessages, normalizeRoutingMode } = require('./lib/routing-logic');
-const { createMetrics } = require('./lib/metrics');
+} = require("./lib/model-utils");
+const {
+  analyzeMessages,
+  normalizeRoutingMode,
+} = require("./lib/routing-logic");
+const { createMetrics } = require("./lib/metrics");
 const {
   loadAndApply,
   watchConfig,
@@ -28,36 +31,112 @@ const {
   saveRoutingMode,
   localModelUnsetInConfigFile,
   localFastUnsetInConfigFile,
-} = require('./lib/hybrid-config');
-const { pickAutoDefaultModels } = require('./lib/auto-default-models');
-const { resolveLocalPool, analyzeLocalTask, pickBestLocalModel, parseParameterBillions } = require('./lib/local-model-picker');
-const { requireAdmin, getAdminToken } = require('./lib/admin-auth');
-const { matchPresetPatch } = require('./lib/ollama-model-presets');
-const { selectEnrichmentHead, mergeEnrichedModels } = require('./lib/ollama-enrich-cap');
+} = require("./lib/hybrid-config");
+const { pickAutoDefaultModels } = require("./lib/auto-default-models");
+const {
+  resolveLocalPool,
+  analyzeLocalTask,
+  pickBestLocalModel,
+  parseParameterBillions,
+} = require("./lib/local-model-picker");
+const { requireAdmin, getAdminToken } = require("./lib/admin-auth");
+const { matchPresetPatch } = require("./lib/ollama-model-presets");
+const {
+  getCloudLimitFeedback,
+  isCloudLimitResponse,
+} = require("./lib/cloud-fallback");
+const {
+  DEFAULT_CLOUD_REDACTION,
+  normalizeCloudRedactionConfig,
+  redactCloudRequestBody,
+} = require("./lib/privacy-redactor");
+const {
+  selectEnrichmentHead,
+  mergeEnrichedModels,
+} = require("./lib/ollama-enrich-cap");
+
+function normalizeCloudProtocol(input) {
+  const v = String(input || "")
+    .trim()
+    .toLowerCase();
+  return v === "http" ? "http" : "https";
+}
 
 const CFG = {
-  port:       (() => {
-    const p = Number.parseInt(process.env.ROUTER_PORT || process.env.PORT || '8082', 10);
+  port: (() => {
+    const p = Number.parseInt(
+      process.env.ROUTER_PORT || process.env.PORT || "8082",
+      10,
+    );
     return Number.isFinite(p) && p > 0 ? p : 8082;
   })(),
-  listenHost: '127.0.0.1',
-  local:      { host: 'localhost', port: 11434, model: 'VladimirGav/gemma4-26b-16GB-VRAM:latest', models: [], smart_routing: true, fast_model: '' },
-  cloud:      { host: 'api.anthropic.com', port: 443 },
-  paramsFile:     path.join(__dirname, '..', '.claude', 'model-params.json'),
-  perModelFile:   path.join(__dirname, '..', '.claude', 'model-params-per-model.json'),
-  resourcesDir:   path.join(__dirname, 'public', 'css'),
+  listenHost: "127.0.0.1",
+  local: {
+    host: String(process.env.ROUTER_OLLAMA_HOST || "").trim() || "localhost",
+    port: (() => {
+      const p = Number.parseInt(process.env.ROUTER_OLLAMA_PORT || "11434", 10);
+      return Number.isFinite(p) && p > 0 ? p : 11434;
+    })(),
+    model: "VladimirGav/gemma4-26b-16GB-VRAM:latest",
+    models: [],
+    smart_routing: true,
+    fast_model: "",
+  },
+  cloud: {
+    protocol: normalizeCloudProtocol(process.env.ROUTER_CLOUD_PROTOCOL),
+    host:
+      String(process.env.ROUTER_CLOUD_HOST || "").trim() || "api.anthropic.com",
+    port: (() => {
+      const proto = normalizeCloudProtocol(process.env.ROUTER_CLOUD_PROTOCOL);
+      const fallback = proto === "http" ? 80 : 443;
+      const p = Number.parseInt(
+        process.env.ROUTER_CLOUD_PORT || String(fallback),
+        10,
+      );
+      return Number.isFinite(p) && p > 0 ? p : fallback;
+    })(),
+  },
+  privacy: {
+    cloud_redaction: { ...DEFAULT_CLOUD_REDACTION },
+  },
+  paramsFile: path.join(__dirname, "..", ".claude", "model-params.json"),
+  perModelFile: path.join(
+    __dirname,
+    "..",
+    ".claude",
+    "model-params-per-model.json",
+  ),
+  resourcesDir: path.join(__dirname, "public", "css"),
   ollamaLogoCandidates: [
-    path.join(__dirname, '..', '..', 'ollama-dashboard', 'app', 'static', 'ollama-logo.png'),
-    path.join(__dirname, 'ollama-logo.png'),
+    path.join(
+      __dirname,
+      "..",
+      "..",
+      "ollama-dashboard",
+      "app",
+      "static",
+      "ollama-logo.png",
+    ),
+    path.join(__dirname, "ollama-logo.png"),
   ],
   routing: {
-    mode: 'hybrid',
-    tokenThreshold:    5000,
+    mode: "hybrid",
+    tokenThreshold: 5000,
     fileReadThreshold: 7,
     keywords: [
-      'architect', 'security audit', 'audit', 'design pattern', 'race condition',
-      'performance optim', 'system design', 'data model', 'api design',
-      'from scratch', 'complex bug', 'multi-file', 'deep reason',
+      "architect",
+      "security audit",
+      "audit",
+      "design pattern",
+      "race condition",
+      "performance optim",
+      "system design",
+      "data model",
+      "api design",
+      "from scratch",
+      "complex bug",
+      "multi-file",
+      "deep reason",
     ].map((k) => String(k).toLowerCase()),
   },
 };
@@ -66,8 +145,9 @@ const metrics = createMetrics();
 const routerDir = __dirname;
 function normalizeLocalCfg() {
   if (!Array.isArray(CFG.local.models)) CFG.local.models = [];
-  if (typeof CFG.local.smart_routing !== 'boolean') CFG.local.smart_routing = true;
-  if (CFG.local.fast_model == null) CFG.local.fast_model = '';
+  if (typeof CFG.local.smart_routing !== "boolean")
+    CFG.local.smart_routing = true;
+  if (CFG.local.fast_model == null) CFG.local.fast_model = "";
   else CFG.local.fast_model = String(CFG.local.fast_model).trim();
 }
 function normalizeRoutingCfg() {
@@ -80,14 +160,25 @@ watchConfig(routerDir, () => {
   loadAndApply(CFG, routerDir);
   normalizeLocalCfg();
   normalizeRoutingCfg();
-  console.log(`[hybrid-config] reloaded listen=${CFG.listenHost} model=${CFG.local.model} mode=${CFG.routing.mode} fast=${CFG.local.fast_model || '(none)'} pool=${CFG.local.models.length || 'all-tags'} smart=${CFG.local.smart_routing} thresholds=${CFG.routing.tokenThreshold}/${CFG.routing.fileReadThreshold}`);
+  console.log(
+    `[hybrid-config] reloaded listen=${CFG.listenHost} model=${CFG.local.model} mode=${CFG.routing.mode} fast=${CFG.local.fast_model || "(none)"} pool=${CFG.local.models.length || "all-tags"} smart=${CFG.local.smart_routing} thresholds=${CFG.routing.tokenThreshold}/${CFG.routing.fileReadThreshold}`,
+  );
+  startIdleUnloadTimer();
 });
 
 // ─── Model parameters ─────────────────────────────────────────────────────────
 const PARAM_DEFAULTS = {
-  temperature: 0.8, top_p: 0.9, top_k: 40, num_ctx: 4096, seed: 0,
-  num_predict: -1, repeat_penalty: 1.1, repeat_last_n: 64,
-  presence_penalty: 0.0, frequency_penalty: 0.0, min_p: 0.05,
+  temperature: 0.8,
+  top_p: 0.9,
+  top_k: 40,
+  num_ctx: 4096,
+  seed: 0,
+  num_predict: -1,
+  repeat_penalty: 1.1,
+  repeat_last_n: 64,
+  presence_penalty: 0.0,
+  frequency_penalty: 0.0,
+  min_p: 0.05,
 };
 /** Sparse overrides on top of builtInParamsForModel (preset + generic defaults). */
 let modelParams = {};
@@ -97,7 +188,7 @@ function coerceParamFileNumbers(obj) {
   for (const k of Object.keys(PARAM_DEFAULTS)) {
     if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
     const v = o[k];
-    if (typeof v === 'string' && v.trim() !== '') {
+    if (typeof v === "string" && v.trim() !== "") {
       const n = Number(v);
       if (Number.isFinite(n)) o[k] = n;
     }
@@ -115,9 +206,10 @@ function sparseGlobalFromFullState(body, modelName) {
   const sparse = {};
   for (const k of Object.keys(PARAM_DEFAULTS)) {
     const v = body[k];
-    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    if (typeof v !== "number" || !Number.isFinite(v)) continue;
     const b = baseline[k];
-    if (typeof b !== 'number' || !Number.isFinite(b) || Math.abs(v - b) > 1e-9) sparse[k] = v;
+    if (typeof b !== "number" || !Number.isFinite(b) || Math.abs(v - b) > 1e-9)
+      sparse[k] = v;
   }
   return sparse;
 }
@@ -125,10 +217,12 @@ function loadParams() {
   modelParams = {};
   try {
     if (!fs.existsSync(CFG.paramsFile)) return;
-    const raw = JSON.parse(fs.readFileSync(CFG.paramsFile, 'utf8'));
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    const raw = JSON.parse(fs.readFileSync(CFG.paramsFile, "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
     const allKeys = Object.keys(PARAM_DEFAULTS);
-    const keysInFile = allKeys.filter((k) => Object.prototype.hasOwnProperty.call(raw, k));
+    const keysInFile = allKeys.filter((k) =>
+      Object.prototype.hasOwnProperty.call(raw, k),
+    );
     const merged = coerceParamFileNumbers({ ...PARAM_DEFAULTS, ...raw });
     if (keysInFile.length >= allKeys.length) {
       const sparse = {};
@@ -136,7 +230,12 @@ function loadParams() {
         if (!Object.prototype.hasOwnProperty.call(raw, k)) continue;
         const v = merged[k];
         const d = PARAM_DEFAULTS[k];
-        if (typeof v === 'number' && Number.isFinite(v) && Math.abs(v - d) > 1e-9) sparse[k] = v;
+        if (
+          typeof v === "number" &&
+          Number.isFinite(v) &&
+          Math.abs(v - d) > 1e-9
+        )
+          sparse[k] = v;
       }
       modelParams = sparse;
     } else {
@@ -153,7 +252,7 @@ function ensureClaudeConfigDir() {
   try {
     fs.mkdirSync(path.dirname(CFG.paramsFile), { recursive: true });
   } catch (e) {
-    console.error('[model-params] mkdir failed:', e && e.message);
+    console.error("[model-params] mkdir failed:", e && e.message);
   }
 }
 function saveParams() {
@@ -161,37 +260,43 @@ function saveParams() {
     ensureClaudeConfigDir();
     fs.writeFileSync(CFG.paramsFile, JSON.stringify(modelParams, null, 2));
   } catch (e) {
-    console.error('[model-params] save global failed:', e && e.message);
+    console.error("[model-params] save global failed:", e && e.message);
   }
 }
-function normModelKey(name) { return String(name || '').trim().toLowerCase(); }
+function normModelKey(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase();
+}
 function loadPerModelParams() {
   try {
     if (fs.existsSync(CFG.perModelFile)) {
-      const raw = JSON.parse(fs.readFileSync(CFG.perModelFile, 'utf8')) || {};
+      const raw = JSON.parse(fs.readFileSync(CFG.perModelFile, "utf8")) || {};
       perModelParams = {};
       for (const [modelKey, patch] of Object.entries(raw)) {
-        if (patch && typeof patch === 'object' && !Array.isArray(patch)) {
+        if (patch && typeof patch === "object" && !Array.isArray(patch)) {
           perModelParams[modelKey] = coerceParamFileNumbers(patch);
         }
       }
     }
-  } catch { perModelParams = {}; }
+  } catch {
+    perModelParams = {};
+  }
 }
 function savePerModelParams() {
   try {
     ensureClaudeConfigDir();
     fs.writeFileSync(CFG.perModelFile, JSON.stringify(perModelParams, null, 2));
   } catch (e) {
-    console.error('[model-params] save per-model failed:', e && e.message);
+    console.error("[model-params] save per-model failed:", e && e.message);
   }
 }
 function getPartialOverride(modelName) {
   const k = normModelKey(modelName);
   let o = perModelParams[k];
-  if (o && typeof o === 'object') return o;
+  if (o && typeof o === "object") return o;
   for (const [key, val] of Object.entries(perModelParams)) {
-    if (normModelKey(key) === k && val && typeof val === 'object') return val;
+    if (normModelKey(key) === k && val && typeof val === "object") return val;
   }
   return {};
 }
@@ -199,32 +304,39 @@ function effectiveParamsFor(modelName) {
   return { ...globalLayerMerged(modelName), ...getPartialOverride(modelName) };
 }
 function cleanGlobalParamsFromJson(parsed) {
-  const merged = { ...PARAM_DEFAULTS, ...(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}) };
+  const merged = {
+    ...PARAM_DEFAULTS,
+    ...(parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : {}),
+  };
   const c = coerceParamFileNumbers(merged);
   return sparseGlobalFromFullState(c, CFG.local.model);
 }
 function cleanPerModelFileFromJson(parsed) {
   const next = {};
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return next;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return next;
   for (const [modelKey, patch] of Object.entries(parsed)) {
     const nk = normModelKey(modelKey);
-    if (!nk || !patch || typeof patch !== 'object' || Array.isArray(patch)) continue;
+    if (!nk || !patch || typeof patch !== "object" || Array.isArray(patch))
+      continue;
     const c = coerceParamFileNumbers(patch);
     const clean = {};
     for (const k of Object.keys(PARAM_DEFAULTS)) {
       const v = c[k];
-      if (typeof v === 'number' && Number.isFinite(v)) clean[k] = v;
+      if (typeof v === "number" && Number.isFinite(v)) clean[k] = v;
     }
     if (Object.keys(clean).length) next[nk] = clean;
   }
   return next;
 }
 function readModelParamsFileRaw(which) {
-  const fp = which === 'per-model' ? CFG.perModelFile : CFG.paramsFile;
+  const fp = which === "per-model" ? CFG.perModelFile : CFG.paramsFile;
   try {
-    if (fs.existsSync(fp)) return fs.readFileSync(fp, 'utf8');
+    if (fs.existsSync(fp)) return fs.readFileSync(fp, "utf8");
   } catch {}
-  return which === 'per-model' ? '{}\n' : '{}\n';
+  return which === "per-model" ? "{}\n" : "{}\n";
 }
 loadParams();
 loadPerModelParams();
@@ -265,13 +377,15 @@ function sampleCpuPercent() {
 }
 
 function parseNvidiaSmiCsv(stdout) {
-  if (!stdout || typeof stdout !== 'string') return null;
+  if (!stdout || typeof stdout !== "string") return null;
   const lines = stdout
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
   for (const line of lines) {
-    const parts = line.split(',').map((s) => parseFloat(String(s).trim().replace(/\s/g, '')));
+    const parts = line
+      .split(",")
+      .map((s) => parseFloat(String(s).trim().replace(/\s/g, "")));
     if (parts.length < 3) continue;
     const [tot, used, gpu] = parts;
     if (![tot, used, gpu].every((n) => Number.isFinite(n))) continue;
@@ -280,16 +394,21 @@ function parseNvidiaSmiCsv(stdout) {
   return null;
 }
 
-let nvidiaCache = null, nvidiaCacheAt = 0;
+let nvidiaCache = null,
+  nvidiaCacheAt = 0;
 function getNvidiaSmi() {
-  if (nvidiaCache && Date.now() - nvidiaCacheAt < 5000) return Promise.resolve(nvidiaCache);
+  if (nvidiaCache && Date.now() - nvidiaCacheAt < 5000)
+    return Promise.resolve(nvidiaCache);
   return new Promise((resolve) => {
     const opts = { timeout: 4500 };
-    if (process.platform === 'win32') opts.windowsHide = true;
+    if (process.platform === "win32") opts.windowsHide = true;
     try {
       execFile(
-        'nvidia-smi',
-        ['--query-gpu=memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits'],
+        "nvidia-smi",
+        [
+          "--query-gpu=memory.total,memory.used,utilization.gpu",
+          "--format=csv,noheader,nounits",
+        ],
         opts,
         (err, stdout) => {
           if (err) {
@@ -316,44 +435,145 @@ function getNvidiaSmi() {
 let ollamaVersionCache = null;
 async function getOllamaVersion() {
   if (ollamaVersionCache) return ollamaVersionCache;
-  const r = await ollamaGet('/api/version');
+  const r = await ollamaGet("/api/version");
   ollamaVersionCache = r?.version || null;
   return ollamaVersionCache;
 }
 
 // ─── Live log & SSE ───────────────────────────────────────────────────────────
-const LOG_MAX = 200, log = [], clients = new Set();
+const LOG_MAX = 200,
+  log = [],
+  clients = new Set();
+let logSeq = 0;
 function pushLog(entry) {
-  log.push(entry);
+  const nextEntry =
+    entry && typeof entry === "object"
+      ? { id: ++logSeq, ...entry }
+      : { id: ++logSeq, value: entry };
+  log.push(nextEntry);
   if (log.length > LOG_MAX) log.shift();
-  const data = `data: ${JSON.stringify(entry)}\n\n`;
-  for (const c of clients) { try { c.write(data); } catch { clients.delete(c); } }
+  const data = `data: ${JSON.stringify(nextEntry)}\n\n`;
+  for (const c of clients) {
+    try {
+      c.write(data);
+    } catch {
+      clients.delete(c);
+    }
+  }
 }
 
 // ─── Routing ──────────────────────────────────────────────────────────────────
+let lastLocalActivityMs = 0;
+let cloudQuotaState = {
+  exceeded: false,
+  message: "",
+  at: 0,
+};
+
+function markCloudQuotaExceeded(message) {
+  const msg = String(message || "Cloud quota exceeded").trim();
+  cloudQuotaState = {
+    exceeded: true,
+    message: msg,
+    at: Date.now(),
+  };
+}
+
+function clearCloudQuotaExceeded() {
+  cloudQuotaState = {
+    exceeded: false,
+    message: "",
+    at: 0,
+  };
+}
+
+function getCloudQuotaState() {
+  return {
+    exceeded: !!cloudQuotaState.exceeded,
+    message: cloudQuotaState.message || "",
+    at: cloudQuotaState.at || 0,
+    disabled_modes: cloudQuotaState.exceeded ? ["hybrid", "cloud"] : [],
+  };
+}
+
 function routeTo(dest, reason, fallback = false, extra = {}) {
   const time = ts();
   metrics.recordRoute(dest, reason, fallback, time);
   const entry = { time, dest, reason, fallback, ...extra };
-  process.stdout.write(`[${entry.time}] ${dest === 'cloud' ? 'CLOUD' : 'LOCAL'} — ${reason}${fallback ? ' (fallback)' : ''}\n`);
+  process.stdout.write(
+    `[${entry.time}] ${dest === "cloud" ? "CLOUD" : "LOCAL"} — ${reason}${fallback ? " (fallback)" : ""}\n`,
+  );
   pushLog(entry);
+  if (dest === "local" || fallback) lastLocalActivityMs = Date.now();
   return dest;
 }
-function ts() { return new Date().toISOString().slice(11, 19); }
-function fmt(n) { if (!n) return '—'; const g=n/1e9; return g>=1?g.toFixed(1)+' GB':(n/1e6).toFixed(0)+' MB'; }
+function ts() {
+  return new Date().toISOString().slice(11, 19);
+}
+function fmt(n) {
+  if (!n) return "—";
+  const g = n / 1e9;
+  return g >= 1 ? g.toFixed(1) + " GB" : (n / 1e6).toFixed(0) + " MB";
+}
+
+// ─── Idle auto-unload ────────────────────────────────────────────────────────
+const IDLE_UNLOAD_DEFAULT_MIN = 2;
+const IDLE_CHECK_INTERVAL_MS = 60_000;
+let idleUnloadTimer = null;
+
+function getIdleUnloadMinutes() {
+  const v = CFG.local.idle_unload_minutes;
+  if (v === 0 || v === false) return 0; // disabled
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : IDLE_UNLOAD_DEFAULT_MIN;
+}
+
+async function checkIdleUnload() {
+  const minutes = getIdleUnloadMinutes();
+  if (!minutes) return;
+  if (!lastLocalActivityMs) return; // never used local
+  const idleMs = Date.now() - lastLocalActivityMs;
+  if (idleMs < minutes * 60_000) return;
+  const ps = await ollamaGetPsWithRetry();
+  const rows = listPsModels(ps);
+  if (!rows.length) return; // nothing loaded
+  for (const row of rows) {
+    const name = psModelId(row);
+    if (!name) continue;
+    process.stdout.write(
+      `[${ts()}] IDLE — unloading ${name} after ${minutes} min idle\n`,
+    );
+    await ollamaTouchModel(name, 0);
+  }
+  lastLocalActivityMs = 0; // reset so we don't re-trigger
+}
+
+function startIdleUnloadTimer() {
+  if (idleUnloadTimer) clearInterval(idleUnloadTimer);
+  if (!getIdleUnloadMinutes()) return;
+  idleUnloadTimer = setInterval(() => {
+    checkIdleUnload().catch(() => {});
+  }, IDLE_CHECK_INTERVAL_MS);
+}
 
 // ─── Ollama helpers ───────────────────────────────────────────────────────────
 /** Map Ollama /api/show capabilities[] to booleans (same aliases as ollama-dashboard main.js). */
 function capabilityFlagsFromShow(show) {
   const unknown = { has_reasoning: null, has_vision: null, has_tools: null };
-  if (!show || typeof show !== 'object') return unknown;
+  if (!show || typeof show !== "object") return unknown;
   const raw = show.details?.capabilities ?? show.capabilities;
   if (!Array.isArray(raw) || raw.length === 0) return unknown;
   const capsLower = raw.map((c) => String(c).toLowerCase().trim());
   const hasAlias = (aliases) => aliases.some((a) => capsLower.includes(a));
-  const visionAliases = ['vision', 'image', 'multimodal'];
-  const toolsAliases = ['tools', 'tool', 'function', 'function-calling', 'tool-use'];
-  const reasoningAliases = ['reasoning', 'thinking', 'think'];
+  const visionAliases = ["vision", "image", "multimodal"];
+  const toolsAliases = [
+    "tools",
+    "tool",
+    "function",
+    "function-calling",
+    "tool-use",
+  ];
+  const reasoningAliases = ["reasoning", "thinking", "think"];
   return {
     has_reasoning: hasAlias(reasoningAliases),
     has_vision: hasAlias(visionAliases),
@@ -363,54 +583,95 @@ function capabilityFlagsFromShow(show) {
 
 function normalizeOllamaTagList(tagsBody) {
   if (!tagsBody || !Array.isArray(tagsBody.models)) return [];
-  return tagsBody.models.map((m) => ({
-    name: String(m.name || m.model || '').trim(),
-    size: typeof m.size === 'number' ? m.size : null,
-    modified_at: m.modified_at || null,
-    digest: m.digest || null,
-  })).filter((x) => x.name);
+  return tagsBody.models
+    .map((m) => ({
+      name: String(m.name || m.model || "").trim(),
+      size: typeof m.size === "number" ? m.size : null,
+      modified_at: m.modified_at || null,
+      digest: m.digest || null,
+    }))
+    .filter((x) => x.name);
 }
 
 function ollamaGet(p) {
-  return new Promise(resolve => {
-    const req = http.request({ hostname: CFG.local.host, port: CFG.local.port, path: p, method: 'GET' }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch { resolve(null); } });
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        hostname: CFG.local.host,
+        port: CFG.local.port,
+        path: p,
+        method: "GET",
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString()));
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+    );
+    req.on("error", () => resolve(null));
+    req.setTimeout(3000, () => {
+      req.destroy();
+      resolve(null);
     });
-    req.on('error', () => resolve(null));
-    req.setTimeout(3000, () => { req.destroy(); resolve(null); });
     req.end();
   });
 }
 
 /** One retry if /api/ps is empty (scheduler race); same idea as ollama-dashboard. */
 async function ollamaGetPsWithRetry() {
-  let ps = await ollamaGet('/api/ps');
+  let ps = await ollamaGet("/api/ps");
   if (listPsModels(ps).length === 0) {
     await new Promise((r) => setTimeout(r, 280));
-    ps = await ollamaGet('/api/ps');
+    ps = await ollamaGet("/api/ps");
   }
   return ps;
 }
 function ollamaPost(p, body) {
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     const data = JSON.stringify(body);
-    const req = http.request({ hostname: CFG.local.host, port: CFG.local.port, path: p, method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, res => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch { resolve(null); } });
+    const req = http.request(
+      {
+        hostname: CFG.local.host,
+        port: CFG.local.port,
+        path: p,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(data),
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString()));
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+    );
+    req.on("error", () => resolve(null));
+    req.setTimeout(5000, () => {
+      req.destroy();
+      resolve(null);
     });
-    req.on('error', () => resolve(null));
-    req.setTimeout(5000, () => { req.destroy(); resolve(null); });
-    req.write(data); req.end();
+    req.write(data);
+    req.end();
   });
 }
 
 function ollamaTouchModel(modelName, keepAlive) {
-  return ollamaPost('/api/generate', {
+  return ollamaPost("/api/generate", {
     model: modelName,
-    prompt: ' ',
+    prompt: " ",
     stream: false,
     keep_alive: keepAlive,
   });
@@ -426,7 +687,7 @@ async function enrichModelsWithMaxContext(models) {
     for (;;) {
       const i = next++;
       if (i >= out.length) return;
-      const show = await ollamaPost('/api/show', { model: out[i].name });
+      const show = await ollamaPost("/api/show", { model: out[i].name });
       out[i].context_max = maxContextFromShow(show);
     }
   }
@@ -444,7 +705,7 @@ async function enrichModelListWithContextCap(models) {
 }
 
 function formatParameterCountFromMi(pc) {
-  if (typeof pc !== 'number' || !Number.isFinite(pc) || pc <= 0) return null;
+  if (typeof pc !== "number" || !Number.isFinite(pc) || pc <= 0) return null;
   const b = pc / 1e9;
   if (b >= 1) return b >= 10 ? `${Math.round(b)}B` : `${b.toFixed(1)}B`;
   const m = pc / 1e6;
@@ -456,26 +717,40 @@ function formatParameterCountFromMi(pc) {
 
 /** Fill family / parameter_size from `model_info` when `details` is empty (common for some GGUF imports). */
 function enrichDetailsFromModelInfo(details, show) {
-  const d = details && typeof details === 'object' ? { ...details } : {};
-  const mi = show && typeof show === 'object' && show.model_info && typeof show.model_info === 'object' ? show.model_info : {};
+  const d = details && typeof details === "object" ? { ...details } : {};
+  const mi =
+    show &&
+    typeof show === "object" &&
+    show.model_info &&
+    typeof show.model_info === "object"
+      ? show.model_info
+      : {};
   const strOrNull = (v) => {
     if (v == null) return null;
     const s = String(v).trim();
-    return s === '' ? null : s;
+    return s === "" ? null : s;
   };
   if (!strOrNull(d.family)) {
     if (Array.isArray(d.families) && d.families.length) {
-      const joined = d.families.map((x) => String(x).trim()).filter(Boolean).join(', ');
+      const joined = d.families
+        .map((x) => String(x).trim())
+        .filter(Boolean)
+        .join(", ");
       if (joined) d.family = joined;
     }
     if (!strOrNull(d.family)) {
-      const arch = strOrNull(mi['general.architecture']);
+      const arch = strOrNull(mi["general.architecture"]);
       if (arch) d.family = arch;
     }
   }
-  if (!strOrNull(d.parameter_size != null ? d.parameter_size : '')) {
-    const raw = mi['general.parameter_count'];
-    const n = typeof raw === 'number' ? raw : (typeof raw === 'string' ? Number(raw) : NaN);
+  if (!strOrNull(d.parameter_size != null ? d.parameter_size : "")) {
+    const raw = mi["general.parameter_count"];
+    const n =
+      typeof raw === "number"
+        ? raw
+        : typeof raw === "string"
+          ? Number(raw)
+          : NaN;
     const fmted = formatParameterCountFromMi(n);
     if (fmted) d.parameter_size = fmted;
   }
@@ -483,7 +758,7 @@ function enrichDetailsFromModelInfo(details, show) {
 }
 
 function summarizeShow(show) {
-  if (!show || typeof show !== 'object') return null;
+  if (!show || typeof show !== "object") return null;
   const d = enrichDetailsFromModelInfo({ ...(show.details || {}) }, show);
   return {
     name: show.model || null,
@@ -499,15 +774,21 @@ function summarizeShow(show) {
 
 /** /api/ps rows often omit `details`; /api/show has full metadata — merge for the dashboard card. */
 function mergeModelDetailsFromShow(running, show) {
-  if (!running || typeof running !== 'object') return running;
-  const psD = running.details && typeof running.details === 'object' ? { ...running.details } : {};
-  const shD = show && show.details && typeof show.details === 'object' ? { ...show.details } : {};
+  if (!running || typeof running !== "object") return running;
+  const psD =
+    running.details && typeof running.details === "object"
+      ? { ...running.details }
+      : {};
+  const shD =
+    show && show.details && typeof show.details === "object"
+      ? { ...show.details }
+      : {};
   return { ...running, details: { ...psD, ...shD } };
 }
 
 function toFiniteNumberLoose(v) {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string' && v.trim() !== '') {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
     const n = Number(v);
     if (Number.isFinite(n)) return n;
   }
@@ -516,35 +797,40 @@ function toFiniteNumberLoose(v) {
 
 /** Precomputed strings/numbers for the dashboard model card (avoids sparse `details` on the client). */
 function buildCardSpecs(show, running) {
-  if (!running || typeof running !== 'object') return null;
+  if (!running || typeof running !== "object") return null;
   const merged = mergeModelDetailsFromShow(running, show);
   const det = enrichDetailsFromModelInfo(merged.details || {}, show);
   const strOrNull = (v) => {
     if (v == null) return null;
     const s = String(v).trim();
-    return s === '' ? null : s;
+    return s === "" ? null : s;
   };
   return {
     family: strOrNull(det.family),
-    parameter_size: strOrNull(det.parameter_size != null ? det.parameter_size : ''),
-    quantization_level: strOrNull(det.quantization_level != null ? det.quantization_level : ''),
+    parameter_size: strOrNull(
+      det.parameter_size != null ? det.parameter_size : "",
+    ),
+    quantization_level: strOrNull(
+      det.quantization_level != null ? det.quantization_level : "",
+    ),
     size: toFiniteNumberLoose(running.size),
     size_vram: toFiniteNumberLoose(running.size_vram),
   };
 }
 
 function contextAllocatedFromPsRow(row) {
-  if (!row || typeof row !== 'object') return null;
+  if (!row || typeof row !== "object") return null;
   const tryOne = (v) => {
-    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.trunc(v);
-    if (typeof v === 'string' && v.trim() !== '') {
+    if (typeof v === "number" && Number.isFinite(v) && v > 0)
+      return Math.trunc(v);
+    if (typeof v === "string" && v.trim() !== "") {
       const n = Number(v);
       if (Number.isFinite(n) && n > 0) return Math.trunc(n);
     }
     return null;
   };
   let a = tryOne(row.context_length) ?? tryOne(row.context_size);
-  if (a == null && row.details && typeof row.details === 'object') {
+  if (a == null && row.details && typeof row.details === "object") {
     a = tryOne(row.details.context_length) ?? tryOne(row.details.context_size);
   }
   return a;
@@ -554,7 +840,7 @@ const PROFILE_CACHE_TTL_MS = 6 * 60 * 1000;
 let profileCache = { waveAt: 0, map: new Map() };
 
 function buildModelProfile(name, show) {
-  if (!show || typeof show !== 'object' || show.error) {
+  if (!show || typeof show !== "object" || show.error) {
     return {
       name,
       context_max: null,
@@ -588,7 +874,7 @@ async function ensureProfilesForModels(names) {
   const missing = names.filter((n) => !profileCache.map.has(n));
   await Promise.all(
     missing.map(async (name) => {
-      const show = await ollamaPost('/api/show', { model: name });
+      const show = await ollamaPost("/api/show", { model: name });
       profileCache.map.set(name, buildModelProfile(name, show));
     }),
   );
@@ -597,134 +883,457 @@ async function ensureProfilesForModels(names) {
 // ─── Translation: Anthropic → OpenAI + inject params ─────────────────────────
 function buildOpenAI(body, p, ollamaModelName) {
   const messages = [];
-  if (body.system) messages.push({ role: 'system', content: body.system });
+  if (body.system) messages.push({ role: "system", content: body.system });
   for (const msg of body.messages || []) {
-    if (!Array.isArray(msg.content)) { messages.push({ role: msg.role, content: msg.content || '' }); continue; }
-    const textBlocks    = msg.content.filter(b => b.type === 'text');
-    const toolUseBlocks = msg.content.filter(b => b.type === 'tool_use');
-    const toolResBlocks = msg.content.filter(b => b.type === 'tool_result');
+    if (!Array.isArray(msg.content)) {
+      messages.push({ role: msg.role, content: msg.content || "" });
+      continue;
+    }
+    const textBlocks = msg.content.filter((b) => b.type === "text");
+    const toolUseBlocks = msg.content.filter((b) => b.type === "tool_use");
+    const toolResBlocks = msg.content.filter((b) => b.type === "tool_result");
     if (toolResBlocks.length) {
       for (const b of toolResBlocks) {
-        const content = Array.isArray(b.content) ? b.content.map(x=>x.text||'').join('\n') : (b.content||'');
-        messages.push({ role: 'tool', tool_call_id: b.tool_use_id, content });
+        const content = Array.isArray(b.content)
+          ? b.content.map((x) => x.text || "").join("\n")
+          : b.content || "";
+        messages.push({ role: "tool", tool_call_id: b.tool_use_id, content });
       }
-      if (textBlocks.length) messages.push({ role: 'user', content: textBlocks.map(b=>b.text).join('\n') });
+      if (textBlocks.length)
+        messages.push({
+          role: "user",
+          content: textBlocks.map((b) => b.text).join("\n"),
+        });
     } else if (toolUseBlocks.length) {
-      messages.push({ role: 'assistant', content: textBlocks.map(b=>b.text).join('\n')||null, tool_calls: toolUseBlocks.map(b=>({ id:b.id, type:'function', function:{ name:b.name, arguments:JSON.stringify(b.input||{}) } })) });
+      messages.push({
+        role: "assistant",
+        content: textBlocks.map((b) => b.text).join("\n") || null,
+        tool_calls: toolUseBlocks.map((b) => ({
+          id: b.id,
+          type: "function",
+          function: { name: b.name, arguments: JSON.stringify(b.input || {}) },
+        })),
+      });
     } else {
-      messages.push({ role: msg.role, content: textBlocks.map(b=>b.text).join('\n') });
+      messages.push({
+        role: msg.role,
+        content: textBlocks.map((b) => b.text).join("\n"),
+      });
     }
   }
-  const tools = (body.tools||[]).map(t=>({ type:'function', function:{ name:t.name, description:t.description||'', parameters:t.input_schema||{type:'object',properties:{}} } }));
-  const ollamaName = (ollamaModelName && String(ollamaModelName).trim()) || CFG.local.model;
-  const out = { model: ollamaName, messages, stream: !!body.stream, max_tokens: p.num_predict>0?p.num_predict:(body.max_tokens||8192), temperature: p.temperature, top_p: p.top_p, top_k: p.top_k, seed: p.seed||undefined, repeat_penalty: p.repeat_penalty, repeat_last_n: p.repeat_last_n, presence_penalty: p.presence_penalty||undefined, frequency_penalty: p.frequency_penalty||undefined, min_p: p.min_p||undefined, num_ctx: p.num_ctx };
+  const tools = (body.tools || []).map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description || "",
+      parameters: t.input_schema || { type: "object", properties: {} },
+    },
+  }));
+  const ollamaName =
+    (ollamaModelName && String(ollamaModelName).trim()) || CFG.local.model;
+  const out = {
+    model: ollamaName,
+    messages,
+    stream: !!body.stream,
+    max_tokens: p.num_predict > 0 ? p.num_predict : body.max_tokens || 8192,
+    temperature: p.temperature,
+    top_p: p.top_p,
+    top_k: p.top_k,
+    seed: p.seed || undefined,
+    repeat_penalty: p.repeat_penalty,
+    repeat_last_n: p.repeat_last_n,
+    presence_penalty: p.presence_penalty || undefined,
+    frequency_penalty: p.frequency_penalty || undefined,
+    min_p: p.min_p || undefined,
+    num_ctx: p.num_ctx,
+  };
   if (tools.length) out.tools = tools;
   return out;
 }
 
 // ─── Translation: OpenAI → Anthropic (non-streaming) ─────────────────────────
 function toAnthropic(oai, model) {
-  const choice = oai.choices?.[0], msg = choice?.message||{};
+  const choice = oai.choices?.[0],
+    msg = choice?.message || {};
   const content = [];
-  const textBody = msg.content || msg.reasoning || '';
-  if (textBody) content.push({ type:'text', text:textBody });
-  for (const tc of msg.tool_calls||[]) content.push({ type:'tool_use', id:tc.id, name:tc.function.name, input:(()=>{try{return JSON.parse(tc.function.arguments);}catch{return{};}})() });
-  const stopMap = { stop:'end_turn', tool_calls:'tool_use', length:'max_tokens' };
-  return { id:oai.id||`msg_local_${Date.now()}`, type:'message', role:'assistant', content, model, stop_reason:stopMap[choice?.finish_reason]||'end_turn', stop_sequence:null, usage:{ input_tokens:oai.usage?.prompt_tokens||0, output_tokens:oai.usage?.completion_tokens||0 } };
+  const textBody = msg.content || msg.reasoning || "";
+  if (textBody) content.push({ type: "text", text: textBody });
+  for (const tc of msg.tool_calls || [])
+    content.push({
+      type: "tool_use",
+      id: tc.id,
+      name: tc.function.name,
+      input: (() => {
+        try {
+          return JSON.parse(tc.function.arguments);
+        } catch {
+          return {};
+        }
+      })(),
+    });
+  const stopMap = {
+    stop: "end_turn",
+    tool_calls: "tool_use",
+    length: "max_tokens",
+  };
+  return {
+    id: oai.id || `msg_local_${Date.now()}`,
+    type: "message",
+    role: "assistant",
+    content,
+    model,
+    stop_reason: stopMap[choice?.finish_reason] || "end_turn",
+    stop_sequence: null,
+    usage: {
+      input_tokens: oai.usage?.prompt_tokens || 0,
+      output_tokens: oai.usage?.completion_tokens || 0,
+    },
+  };
 }
 
 // ─── Streaming: OpenAI SSE → Anthropic SSE ────────────────────────────────────
 function pipeLocalStream(src, res, model) {
   const msgId = `msg_local_${Date.now()}`;
-  let buf='', started=false, blockIdx=0, textOpen=false, toolOpen=false, toolI=null;
-  const tools={};
-  const send=(ev,data)=>res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
-  const ensureStarted=()=>{ if(started)return; started=true; send('message_start',{type:'message_start',message:{id:msgId,type:'message',role:'assistant',content:[],model,stop_reason:null,stop_sequence:null,usage:{input_tokens:0,output_tokens:0}}}); send('ping',{type:'ping'}); };
-  const openText=()=>{ if(textOpen)return; if(toolOpen){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;toolOpen=false;toolI=null;} textOpen=true; send('content_block_start',{type:'content_block_start',index:blockIdx,content_block:{type:'text',text:''}}); };
-  const openTool=(i,tid,name)=>{ if(toolOpen&&toolI===i)return; if(textOpen){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;textOpen=false;} if(toolOpen&&toolI!==i){send('content_block_stop',{type:'content_block_stop',index:blockIdx});blockIdx++;} toolOpen=true;toolI=i; send('content_block_start',{type:'content_block_start',index:blockIdx,content_block:{type:'tool_use',id:tid,name,input:{}}}); };
-  src.on('data', chunk=>{ buf+=chunk.toString(); const lines=buf.split('\n'); buf=lines.pop(); for(const line of lines){ if(!line.startsWith('data: '))continue; const raw=line.slice(6).trim(); if(raw==='[DONE]')continue; let p;try{p=JSON.parse(raw);}catch{continue;} const d=p.choices?.[0]?.delta,fin=p.choices?.[0]?.finish_reason; if(!d&&!fin)continue; ensureStarted(); const textChunk=d?.content||d?.reasoning||''; if(textChunk){openText();send('content_block_delta',{type:'content_block_delta',index:blockIdx,delta:{type:'text_delta',text:textChunk}});} if(d?.tool_calls){for(const tc of d.tool_calls){const i=tc.index??0;if(!tools[i])tools[i]={id:tc.id||`toolu_${Date.now()}_${i}`,name:tc.function?.name||''};if(tc.id)tools[i].id=tc.id;if(tc.function?.name)tools[i].name=tc.function.name;openTool(i,tools[i].id,tools[i].name);if(tc.function?.arguments)send('content_block_delta',{type:'content_block_delta',index:blockIdx,delta:{type:'input_json_delta',partial_json:tc.function.arguments}});}} if(fin){if(textOpen||toolOpen)send('content_block_stop',{type:'content_block_stop',index:blockIdx});ensureStarted();const stopMap={stop:'end_turn',tool_calls:'tool_use',length:'max_tokens'};send('message_delta',{type:'message_delta',delta:{stop_reason:stopMap[fin]||'end_turn',stop_sequence:null},usage:{output_tokens:0}});send('message_stop',{type:'message_stop'});} } });
-  src.on('end',()=>res.end()); src.on('error',()=>res.end());
+  let buf = "",
+    started = false,
+    blockIdx = 0,
+    textOpen = false,
+    toolOpen = false,
+    toolI = null;
+  const tools = {};
+  const send = (ev, data) =>
+    res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
+  const ensureStarted = () => {
+    if (started) return;
+    started = true;
+    send("message_start", {
+      type: "message_start",
+      message: {
+        id: msgId,
+        type: "message",
+        role: "assistant",
+        content: [],
+        model,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    });
+    send("ping", { type: "ping" });
+  };
+  const openText = () => {
+    if (textOpen) return;
+    if (toolOpen) {
+      send("content_block_stop", {
+        type: "content_block_stop",
+        index: blockIdx,
+      });
+      blockIdx++;
+      toolOpen = false;
+      toolI = null;
+    }
+    textOpen = true;
+    send("content_block_start", {
+      type: "content_block_start",
+      index: blockIdx,
+      content_block: { type: "text", text: "" },
+    });
+  };
+  const openTool = (i, tid, name) => {
+    if (toolOpen && toolI === i) return;
+    if (textOpen) {
+      send("content_block_stop", {
+        type: "content_block_stop",
+        index: blockIdx,
+      });
+      blockIdx++;
+      textOpen = false;
+    }
+    if (toolOpen && toolI !== i) {
+      send("content_block_stop", {
+        type: "content_block_stop",
+        index: blockIdx,
+      });
+      blockIdx++;
+    }
+    toolOpen = true;
+    toolI = i;
+    send("content_block_start", {
+      type: "content_block_start",
+      index: blockIdx,
+      content_block: { type: "tool_use", id: tid, name, input: {} },
+    });
+  };
+  src.on("data", (chunk) => {
+    buf += chunk.toString();
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const raw = line.slice(6).trim();
+      if (raw === "[DONE]") continue;
+      let p;
+      try {
+        p = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      const d = p.choices?.[0]?.delta,
+        fin = p.choices?.[0]?.finish_reason;
+      if (!d && !fin) continue;
+      ensureStarted();
+      const textChunk = d?.content || d?.reasoning || "";
+      if (textChunk) {
+        openText();
+        send("content_block_delta", {
+          type: "content_block_delta",
+          index: blockIdx,
+          delta: { type: "text_delta", text: textChunk },
+        });
+      }
+      if (d?.tool_calls) {
+        for (const tc of d.tool_calls) {
+          const i = tc.index ?? 0;
+          if (!tools[i])
+            tools[i] = {
+              id: tc.id || `toolu_${Date.now()}_${i}`,
+              name: tc.function?.name || "",
+            };
+          if (tc.id) tools[i].id = tc.id;
+          if (tc.function?.name) tools[i].name = tc.function.name;
+          openTool(i, tools[i].id, tools[i].name);
+          if (tc.function?.arguments)
+            send("content_block_delta", {
+              type: "content_block_delta",
+              index: blockIdx,
+              delta: {
+                type: "input_json_delta",
+                partial_json: tc.function.arguments,
+              },
+            });
+        }
+      }
+      if (fin) {
+        if (textOpen || toolOpen)
+          send("content_block_stop", {
+            type: "content_block_stop",
+            index: blockIdx,
+          });
+        ensureStarted();
+        const stopMap = {
+          stop: "end_turn",
+          tool_calls: "tool_use",
+          length: "max_tokens",
+        };
+        send("message_delta", {
+          type: "message_delta",
+          delta: {
+            stop_reason: stopMap[fin] || "end_turn",
+            stop_sequence: null,
+          },
+          usage: { output_tokens: 0 },
+        });
+        send("message_stop", { type: "message_stop" });
+      }
+    }
+  });
+  src.on("end", () => res.end());
+  src.on("error", () => res.end());
 }
 
 // ─── Proxies ──────────────────────────────────────────────────────────────────
-function isCloudLimitResponse(statusCode, bodyText) {
-  if (statusCode === 429) return true;
-  const t = String(bodyText || '').toLowerCase();
-  return (
-    t.includes("you've hit your limit") ||
-    t.includes("you have hit your limit") ||
-    t.includes("rate limit") ||
-    t.includes("exceeded your current quota") ||
-    t.includes("insufficient credits")
-  );
-}
-
 function ollamaUnreachableMayUseCloud() {
-  return normalizeRoutingMode(CFG.routing.mode) !== 'local';
+  return normalizeRoutingMode(CFG.routing.mode) !== "local";
 }
 
-function proxyCloud(incoming, rawBody, body, res, fallback=false) {
-  if (fallback) routeTo('cloud', 'Ollama unreachable', true);
-  const streaming=!!body.stream;
-  const opts={hostname:CFG.cloud.host,port:CFG.cloud.port,path:incoming.url,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(rawBody),...(incoming.headers['x-api-key']&&{'x-api-key':incoming.headers['x-api-key']}),...(incoming.headers['authorization']&&{'authorization':incoming.headers['authorization']}),...(incoming.headers['anthropic-version']&&{'anthropic-version':incoming.headers['anthropic-version']}),...(incoming.headers['anthropic-beta']&&{'anthropic-beta':incoming.headers['anthropic-beta']})}};
-  const req=https.request(opts,upstream=>{
-    const canFallbackLocal = !fallback && normalizeRoutingMode(CFG.routing.mode) !== 'cloud';
-    if(streaming){
-      if(upstream.statusCode >= 400){
-        const chunks=[];
-        upstream.on('data',c=>chunks.push(c));
-        upstream.on('end',()=>{
-          const bodyBuf=Buffer.concat(chunks);
-          const bodyTxt=bodyBuf.toString();
-          if(canFallbackLocal && isCloudLimitResponse(upstream.statusCode, bodyTxt)){
-            routeTo('local', 'cloud limit detected, fallback to local', true);
+function proxyCloud(incoming, rawBody, body, res, fallback = false) {
+  const cloudTransport = CFG.cloud.protocol === "http" ? http : https;
+  const privacy = redactCloudRequestBody(body, CFG.privacy.cloud_redaction);
+  const cloudBody = privacy.changed ? privacy.body : body;
+  const cloudRawBody = privacy.changed
+    ? Buffer.from(JSON.stringify(cloudBody))
+    : rawBody;
+  if (fallback)
+    routeTo("cloud", "Ollama unreachable", true, { cloud_model: body.model });
+  const streaming = !!cloudBody.stream;
+  const opts = {
+    hostname: CFG.cloud.host,
+    port: CFG.cloud.port,
+    path: incoming.url,
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(cloudRawBody),
+      ...(incoming.headers["x-api-key"] && {
+        "x-api-key": incoming.headers["x-api-key"],
+      }),
+      ...(incoming.headers["authorization"] && {
+        authorization: incoming.headers["authorization"],
+      }),
+      ...(incoming.headers["anthropic-version"] && {
+        "anthropic-version": incoming.headers["anthropic-version"],
+      }),
+      ...(incoming.headers["anthropic-beta"] && {
+        "anthropic-beta": incoming.headers["anthropic-beta"],
+      }),
+    },
+  };
+  const req = cloudTransport.request(opts, (upstream) => {
+    const canFallbackLocal =
+      !fallback && normalizeRoutingMode(CFG.routing.mode) !== "cloud";
+    if (streaming) {
+      if (upstream.statusCode >= 400) {
+        const chunks = [];
+        upstream.on("data", (c) => chunks.push(c));
+        upstream.on("end", () => {
+          const bodyBuf = Buffer.concat(chunks);
+          const bodyTxt = bodyBuf.toString();
+          const feedback = getCloudLimitFeedback(
+            upstream.statusCode,
+            bodyTxt,
+            upstream.headers["content-type"],
+          );
+          if (
+            canFallbackLocal &&
+            isCloudLimitResponse(
+              upstream.statusCode,
+              bodyTxt,
+              upstream.headers["content-type"],
+            )
+          ) {
+            markCloudQuotaExceeded(feedback || bodyTxt);
+            routeTo("local", "cloud limit detected, fallback to local", true);
             return proxyLocal(incoming, body, res, rawBody);
           }
-          res.writeHead(upstream.statusCode,{'Content-Type':'application/json'});
+          res.writeHead(upstream.statusCode, {
+            "Content-Type": "application/json",
+          });
           res.end(bodyBuf);
         });
         return;
       }
-      res.writeHead(upstream.statusCode,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});
-      upstream.pipe(res);
+      let redirected = false;
+      let sniffing = true;
+      const sniffedChunks = [];
+      let sniffedBytes = 0;
+      const flushStream = () => {
+        if (redirected || !sniffing) return;
+        sniffing = false;
+        clearCloudQuotaExceeded();
+        res.writeHead(upstream.statusCode, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+        });
+        for (const chunk of sniffedChunks) res.write(chunk);
+        sniffedChunks.length = 0;
+      };
+      upstream.on("data", (chunk) => {
+        if (redirected) return;
+        if (!sniffing) {
+          res.write(chunk);
+          return;
+        }
+        sniffedChunks.push(chunk);
+        sniffedBytes += chunk.length;
+        const preview = Buffer.concat(sniffedChunks).toString("utf8");
+        const feedback = getCloudLimitFeedback(
+          upstream.statusCode,
+          preview,
+          upstream.headers["content-type"],
+        );
+        if (
+          canFallbackLocal &&
+          isCloudLimitResponse(
+            upstream.statusCode,
+            preview,
+            upstream.headers["content-type"],
+          )
+        ) {
+          redirected = true;
+          markCloudQuotaExceeded(feedback || preview);
+          try {
+            upstream.destroy();
+          } catch {}
+          routeTo("local", "cloud limit detected, fallback to local", true);
+          void proxyLocal(incoming, body, res, rawBody);
+          return;
+        }
+        if (preview.includes("\n\n") || sniffedBytes >= 16384) {
+          flushStream();
+        }
+      });
+      upstream.on("end", () => {
+        if (redirected) return;
+        flushStream();
+        res.end();
+      });
+      upstream.on("error", () => {
+        if (redirected) return;
+        if (!res.headersSent) {
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "cloud stream error" }));
+          return;
+        }
+        res.end();
+      });
       return;
     }
 
-    const chunks=[];
-    upstream.on('data',c=>chunks.push(c));
-    upstream.on('end',()=>{
-      const bodyBuf=Buffer.concat(chunks);
-      const bodyTxt=bodyBuf.toString();
-      if(canFallbackLocal && isCloudLimitResponse(upstream.statusCode, bodyTxt)){
-        routeTo('local', 'cloud limit detected, fallback to local', true);
+    const chunks = [];
+    upstream.on("data", (c) => chunks.push(c));
+    upstream.on("end", () => {
+      const bodyBuf = Buffer.concat(chunks);
+      const bodyTxt = bodyBuf.toString();
+      const feedback = getCloudLimitFeedback(
+        upstream.statusCode,
+        bodyTxt,
+        upstream.headers["content-type"],
+      );
+      if (
+        canFallbackLocal &&
+        isCloudLimitResponse(
+          upstream.statusCode,
+          bodyTxt,
+          upstream.headers["content-type"],
+        )
+      ) {
+        markCloudQuotaExceeded(feedback || bodyTxt);
+        routeTo("local", "cloud limit detected, fallback to local", true);
         return proxyLocal(incoming, body, res, rawBody);
       }
-      res.writeHead(upstream.statusCode,{'Content-Type':'application/json'});
+      if (upstream.statusCode < 400) clearCloudQuotaExceeded();
+      res.writeHead(upstream.statusCode, {
+        "Content-Type": "application/json",
+      });
       res.end(bodyBuf);
     });
   });
-  req.on('error',()=>{ if(!res.headersSent)res.writeHead(502).end(JSON.stringify({error:'cloud error'})); });
-  req.write(rawBody); req.end();
+  req.on("error", () => {
+    if (!res.headersSent)
+      res.writeHead(502).end(JSON.stringify({ error: "cloud error" }));
+  });
+  req.write(cloudRawBody);
+  req.end();
 }
 function proxyLocal(incoming, body, res, rawBody, routeSummary) {
   const streaming = !!body.stream;
-  const anthropicModel = body.model || 'unknown';
+  const anthropicModel = body.model || "unknown";
   (async () => {
     let chosen = CFG.local.model;
-    let pickReason = 'default model';
+    let pickReason = "default model";
     try {
-      const tagsBody = await ollamaGet('/api/tags');
+      const tagsBody = await ollamaGet("/api/tags");
       const tagList = normalizeOllamaTagList(tagsBody).map((m) => m.name);
       const pool = resolveLocalPool(CFG, tagList);
       if (!pool.length) {
         chosen = CFG.local.model;
-        pickReason = 'empty pool (fallback)';
+        pickReason = "empty pool (fallback)";
       } else if (pool.length === 1) {
         chosen = pool[0];
-        pickReason = 'only one model in pool';
+        pickReason = "only one model in pool";
       } else if (!CFG.local.smart_routing) {
         chosen = pool.includes(CFG.local.model) ? CFG.local.model : pool[0];
-        pickReason = 'smart routing off';
+        pickReason = "smart routing off";
       } else {
         await ensureProfilesForModels(pool);
         let profiles = pool.map((n) => profileCache.map.get(n)).filter(Boolean);
@@ -733,65 +1342,110 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
         }
         const task = analyzeLocalTask(body);
         const effCtx = effectiveParamsFor(CFG.local.model).num_ctx;
-        const pick = pickBestLocalModel(profiles, task, CFG.local.model, effCtx, CFG.local.fast_model);
+        const pick = pickBestLocalModel(
+          profiles,
+          task,
+          CFG.local.model,
+          effCtx,
+          CFG.local.fast_model,
+        );
         chosen = pick.model;
         pickReason = pick.reason;
       }
       const p = effectiveParamsFor(chosen);
       const openaiBody = JSON.stringify(buildOpenAI(body, p, chosen));
-      routeTo('local', `${routeSummary.reason} · ${chosen} — ${pickReason}`, false, { local_model: chosen });
-      const opts = { hostname: CFG.local.host, port: CFG.local.port, path: '/v1/chat/completions', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(openaiBody), authorization: 'Bearer ollama' } };
+      routeTo(
+        "local",
+        `${routeSummary.reason} · ${chosen} — ${pickReason}`,
+        false,
+        { local_model: chosen },
+      );
+      const opts = {
+        hostname: CFG.local.host,
+        port: CFG.local.port,
+        path: "/v1/chat/completions",
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(openaiBody),
+          authorization: "Bearer ollama",
+        },
+      };
       const req = http.request(opts, (upstream) => {
         if (upstream.statusCode !== 200) {
-          if (ollamaUnreachableMayUseCloud()) return proxyCloud(incoming, rawBody, body, res, true);
+          if (ollamaUnreachableMayUseCloud())
+            return proxyCloud(incoming, rawBody, body, res, true);
           if (!res.headersSent) {
-            res.writeHead(502, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Ollama error (Ollama-only mode: no cloud fallback)' }));
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "Ollama error (Ollama-only mode: no cloud fallback)",
+              }),
+            );
           }
           return;
         }
         if (streaming) {
-          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+          });
           pipeLocalStream(upstream, res, anthropicModel);
         } else {
           const chunks = [];
-          upstream.on('data', (c) => chunks.push(c));
-          upstream.on('end', () => {
+          upstream.on("data", (c) => chunks.push(c));
+          upstream.on("end", () => {
             try {
               const oai = JSON.parse(Buffer.concat(chunks).toString());
-              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify(toAnthropic(oai, anthropicModel)));
             } catch {
-              if (ollamaUnreachableMayUseCloud()) proxyCloud(incoming, rawBody, body, res, true);
+              if (ollamaUnreachableMayUseCloud())
+                proxyCloud(incoming, rawBody, body, res, true);
               else if (!res.headersSent) {
-                res.writeHead(502, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: 'Bad response from Ollama (Ollama-only mode)' }));
+                res.writeHead(502, { "Content-Type": "application/json" });
+                res.end(
+                  JSON.stringify({
+                    error: "Bad response from Ollama (Ollama-only mode)",
+                  }),
+                );
               }
             }
           });
         }
       });
-      req.on('error', () => {
-        if (ollamaUnreachableMayUseCloud()) proxyCloud(incoming, rawBody, body, res, true);
+      req.on("error", () => {
+        if (ollamaUnreachableMayUseCloud())
+          proxyCloud(incoming, rawBody, body, res, true);
         else if (!res.headersSent) {
-          res.writeHead(502, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Ollama unreachable (Ollama-only mode)' }));
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({ error: "Ollama unreachable (Ollama-only mode)" }),
+          );
         }
       });
       req.write(openaiBody);
       req.end();
     } catch {
-      if (ollamaUnreachableMayUseCloud()) proxyCloud(incoming, rawBody, body, res, true);
+      if (ollamaUnreachableMayUseCloud())
+        proxyCloud(incoming, rawBody, body, res, true);
       else if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Ollama unreachable (Ollama-only mode)' }));
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ error: "Ollama unreachable (Ollama-only mode)" }),
+        );
       }
     }
   })();
 }
 
 function readBody(req) {
-  return new Promise((resolve,reject)=>{ const chunks=[]; req.on('data',c=>chunks.push(c)); req.on('end',()=>resolve(Buffer.concat(chunks))); req.on('error',reject); });
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
 }
 
 // ─── Dashboard HTML ───────────────────────────────────────────────────────────
@@ -804,19 +1458,25 @@ function paramNumber(key, label, desc, min, max, val) {
 
 /** JSON.stringify output safe for embedding in an inline HTML script (avoids closing the script tag on U+003C in data). */
 function jsonForInlineScript(value) {
-  return JSON.stringify(value).replace(/</g, '\\u003c');
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 function dashboardHTML(cfg) {
   const p = effectiveParamsFor(cfg.local.model);
-  const routingModeInitial = normalizeRoutingMode(cfg.routing && cfg.routing.mode);
+  const routingModeInitial = normalizeRoutingMode(
+    cfg.routing && cfg.routing.mode,
+  );
   const routingModeLabel =
-    routingModeInitial === 'cloud' ? 'Claude only' : routingModeInitial === 'local' ? 'Ollama only' : 'Hybrid';
+    routingModeInitial === "cloud"
+      ? "Claude only"
+      : routingModeInitial === "local"
+        ? "Ollama only"
+        : "Hybrid";
   return `<!DOCTYPE html>
 <html lang="en" class="dark hybrid-dashboard">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Claude Hybrid Router</title>
+<title>ClaudeLlama Router</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
 <link rel="stylesheet" href="/assets/dashboard-extra.css">
 <link rel="stylesheet" href="/assets/ollama-dashboard-model-card.css">
@@ -884,6 +1544,7 @@ a{color:inherit}
 .health-dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
 .svc-btns{display:flex;gap:.25rem;align-items:center}
 .svc-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;border:1px solid var(--btn-border);background:var(--btn-bg);color:var(--btn-text);cursor:pointer;font-size:11px;transition:all .15s}
+.vram-model-actions .svc-btn{width:auto;min-width:28px;padding:0 10px;white-space:nowrap}
 .svc-btn:hover:not(:disabled){filter:brightness(1.3)}
 .svc-btn:disabled{opacity:.35;cursor:not-allowed}
 .svc-btn.start{color:#4ade80;border-color:rgba(34,197,94,.3)}
@@ -915,6 +1576,29 @@ a{color:inherit}
 .routing-mode-btn--section:focus-visible{
   outline:2px solid var(--accent);outline-offset:3px;
 }
+.routing-mode-btn-group{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;align-items:stretch}
+.routing-mode-btn--choice{min-width:120px;flex:0 1 auto;flex-direction:column;align-items:flex-start;padding:10px 14px;text-align:left}
+.routing-mode-btn-main{display:block;font-size:12.5px;font-weight:700;line-height:1.2}
+.routing-mode-btn-sub{display:block;font-size:10px;font-weight:600;line-height:1.25;opacity:.86;margin-top:2px}
+.routing-mode-btn--choice.is-active{outline:2px solid rgba(255,255,255,.22);outline-offset:1px}
+.routing-mode-btn--choice.is-disabled,
+.routing-mode-btn--choice:disabled{
+  background:rgba(148,163,184,.12) !important;
+  border-color:rgba(148,163,184,.24) !important;
+  color:#94a3b8 !important;
+  box-shadow:none !important;
+  cursor:not-allowed;
+  filter:none !important;
+  transform:none !important;
+}
+.routing-mode-btn--choice.is-disabled .routing-mode-btn-sub,
+.routing-mode-btn--choice:disabled .routing-mode-btn-sub{color:#cbd5e1;opacity:.92}
+.routing-mode-status{display:none;margin-top:8px;padding:8px 10px;border-radius:10px;border:1px solid rgba(148,163,184,.22);background:rgba(148,163,184,.08);font-size:11px;line-height:1.45;color:var(--text2)}
+.routing-mode-status.is-visible{display:block}
+.routing-mode-status strong{color:var(--text)}
+html.light .routing-mode-btn--choice.is-disabled,
+html.light .routing-mode-btn--choice:disabled{background:rgba(148,163,184,.16) !important;color:#64748b !important;border-color:rgba(100,116,139,.24) !important}
+html.light .routing-mode-status{background:rgba(148,163,184,.12);border-color:rgba(100,116,139,.2);color:#475569}
 .routing-mode--hybrid{background:rgba(245,158,11,.22);color:#fbbf24;border-color:rgba(245,158,11,.5);box-shadow:0 0 0 1px rgba(245,158,11,.12)}
 .routing-mode--cloud{background:rgba(167,139,250,.22);color:#c4b5fd;border-color:rgba(167,139,250,.55);box-shadow:0 0 0 1px rgba(167,139,250,.12)}
 .routing-mode--local{background:rgba(34,197,94,.2);color:#4ade80;border-color:rgba(34,197,94,.5);box-shadow:0 0 0 1px rgba(34,197,94,.1)}
@@ -999,6 +1683,7 @@ h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;le
 .models-routing-bar-hint{font-size:11px;color:var(--text2);line-height:1.4;max-width:40rem}
 @media(max-width:520px){
   .models-routing-bar{flex-direction:column;align-items:stretch}
+  .routing-mode-btn-group{width:100%}
   .routing-mode-btn--section{width:100%}
 }
 .models-toolbar-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;margin-bottom:6px}
@@ -1063,6 +1748,9 @@ html.light .dash-bmc-link{color:#0c4a6e}
 }
 .dash-card--params .params-sub{margin-top:0;margin-bottom:8px}
 .dash-card--params>.dash-section-title{border-bottom:none;padding-bottom:0;margin-bottom:10px}
+.params-card-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 14px;margin-bottom:10px}
+.params-card-header>.dash-section-title{margin-bottom:0;border-bottom:none;padding-bottom:0}
+.params-card-header>.params-toolbar{margin-bottom:0}
 
 /* Model card layout: ollama-dashboard (see /assets/ollama-dashboard-model-card.css) */
 .local-model-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 6px}
@@ -1201,6 +1889,38 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   text-transform:none;
   color:var(--text3);
 }
+.fixed-log-head-main{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  min-width:0;
+  flex-wrap:wrap;
+}
+.fixed-log-stats{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+.fixed-log-stat{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  padding:3px 8px;
+  border-radius:999px;
+  border:1px solid var(--tile-border);
+  background:var(--surface);
+  font-size:10.5px;
+  color:var(--text2);
+}
+.fixed-log-stat strong{
+  font-size:11px;
+  font-weight:700;
+  color:var(--text);
+}
+.fixed-log-stat.local strong{color:var(--green)}
+.fixed-log-stat.cloud strong{color:var(--blue)}
+.fixed-log-stat.total strong{color:#a78bfa}
 .fixed-log-tools{
   display:inline-flex;
   align-items:center;
@@ -1225,6 +1945,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   line-height:1.45;
   background:var(--surface2);
 }
+.fixed-log-empty{color:var(--text3);font-size:12px;padding:18px 4px;text-align:center}
 .fixed-log-line{
   padding:2px 0;
   border-bottom:1px dashed rgba(255,255,255,.08);
@@ -1248,29 +1969,24 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
 <header class="hdr">
   <div class="hdr-inner">
   <div class="hdr-bar">
-    <!-- Left: logo + health + service controls -->
+    <!-- Left: logo + health -->
     <div class="hdr-left">
       <span class="hdr-logos">
         <span class="hdr-logo"><img src="/assets/ollama-logo.png" alt="Ollama"></span>
         <span class="hdr-logo"><img src="/assets/claude-code-icon.svg" alt="Claude Code"></span>
       </span>
-           <span class="hdr-brand">Claude Hybrid</span>
+           <span class="hdr-brand">ClaudeLlama</span>
       <span class="health-badge degraded" id="health-badge">
         <span class="health-dot"></span>
         <span id="health-text">Checking...</span>
       </span>
-      <div class="svc-btns">
-        <button class="svc-btn start" id="btn-start"  title="Start Ollama"   onclick="svcAction('start')"   disabled>&#9654;</button>
-        <button class="svc-btn stop"  id="btn-stop"   title="Stop Ollama"    onclick="svcAction('stop')"    disabled>&#9632;</button>
-        <button class="svc-btn restart" id="btn-restart" title="Restart Ollama" onclick="svcAction('restart')" disabled>&#10227;</button>
-      </div>
     </div>
     <!-- Right: meta panel -->
     <div class="hdr-meta">
       <div class="chips">
         <span class="chip" id="chip-ollama">Ollama</span>
         <span class="chip mono">localhost:11434</span>
-        <span class="chip mono">${String(cfg.listenHost).replace(/[<>&]/g, '')}:${cfg.port}</span>
+        <span class="chip mono">${String(cfg.listenHost).replace(/[<>&]/g, "")}:${cfg.port}</span>
       </div>
       <div class="last-route-bar local" id="last-route-bar"><span id="last-route-text"></span></div>
       <div class="refresh-row">
@@ -1317,11 +2033,6 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
       if(text) text.textContent='Unhealthy'+(d.error?' \u00b7 '+d.error:'');
       if(rdot) rdot.className='rdot err';
     }
-    var running=d.status==='healthy';
-    var bs=document.getElementById('btn-start'), bt=document.getElementById('btn-stop'), br=document.getElementById('btn-restart');
-    if(bs) bs.disabled=running;
-    if(bt) bt.disabled=!running;
-    if(br) br.disabled=!running;
   }
   var ac=new AbortController();
   var tid=setTimeout(function(){ try{ ac.abort(); }catch(_){} },8000);
@@ -1503,10 +2214,15 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
         <span class="models-routing-bar-title" id="routing-mode-heading">API routing mode</span>
         <span class="models-routing-bar-hint">Hybrid follows your thresholds and keywords; Claude only or Ollama only force every request that way. Click to cycle modes.</span>
       </div>
-      <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode--${routingModeInitial}" id="routing-mode-btn" title="Click to cycle: Hybrid → Claude only → Ollama only" aria-label="Routing mode: ${routingModeLabel.replace(/"/g, '&quot;')}">${routingModeLabel}</button>
+      <div class="routing-mode-btn-group" role="group" aria-label="Choose API routing mode">
+        <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--hybrid" id="routing-mode-btn-hybrid" data-mode="hybrid"></button>
+        <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--cloud" id="routing-mode-btn-cloud" data-mode="cloud"></button>
+        <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--local" id="routing-mode-btn-local" data-mode="local"></button>
+      </div>
     </div>
+    <div class="routing-mode-status" id="routing-mode-status" role="status" aria-live="polite"></div>
     <h3 class="dash-subsection-title" id="dash-ollama-runtime-h">Ollama runtime</h3>
-    <p class="pool-explainer" style="margin-top:4px;margin-bottom:8px">Models currently in GPU memory from Ollama <span class="inline-code">/api/ps</span>. Each card has Restart / Stop / Info / Settings controls. Use <strong>Start</strong> below when no model is loaded.</p>
+    <p class="pool-explainer" style="margin-top:4px;margin-bottom:8px">Loaded models are highlighted. This runtime list also shows every pooled model so you can inspect details or edit settings even when a tag is not currently in VRAM. Loaded models auto-unload after idle time.</p>
     <div class="svc-btns vram-model-actions" id="vram-global-actions" style="margin-bottom:10px" role="group" aria-label="Load default model in Ollama">
       <button type="button" class="svc-btn start" id="btn-m-start" title="Load configured default model into VRAM" onclick="void modelAction('/api/router/model/start')">&#9654; Start default</button>
     </div>
@@ -1542,10 +2258,12 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   </section>
 
   <section class="dash-card dash-card--params" id="section-model-params" aria-labelledby="dash-gen-h">
+    <div class="params-card-header">
     <h2 class="dash-section-title" id="dash-gen-h">Generation parameters</h2>
     <div class="params-toolbar">
       <button type="button" class="pbtn pbtn-secondary" id="btn-open-gen-json" onclick="openModelParamsFilesModal()">Edit config (JSON)…</button>
       <button type="button" class="pbtn pbtn-secondary" id="btn-open-gen-settings" onclick="openSettingsModal()">Generation settings…</button>
+    </div>
     </div>
   <div class="params-panel">
     <div class="params-hdr">
@@ -1556,20 +2274,20 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
       </div>
     </div>
     <div class="params-grid">
-      ${paramSlider('temperature','Temperature','Randomness. Lower = focused.',0,2,.05,p.temperature)}
-      ${paramSlider('top_p','Top P','Nucleus sampling cutoff.',0,1,.05,p.top_p)}
-      ${paramSlider('top_k','Top K','Vocabulary pool size.',1,100,1,p.top_k)}
-      ${paramNumber('num_ctx','Context length','Tokens in context window. Affects VRAM.',512,131072,p.num_ctx)}
-      ${paramNumber('seed','Seed','0 = random. Fixed = reproducible.',-1,999999,p.seed)}
-      ${paramSlider('repeat_penalty','Repeat penalty','Discourages repetition. 1.0 = off.',1,1.5,.01,p.repeat_penalty)}
+      ${paramSlider("temperature", "Temperature", "Randomness. Lower = focused.", 0, 2, 0.05, p.temperature)}
+      ${paramSlider("top_p", "Top P", "Nucleus sampling cutoff.", 0, 1, 0.05, p.top_p)}
+      ${paramSlider("top_k", "Top K", "Vocabulary pool size.", 1, 100, 1, p.top_k)}
+      ${paramNumber("num_ctx", "Context length", "Tokens in context window. Affects VRAM.", 512, 131072, p.num_ctx)}
+      ${paramNumber("seed", "Seed", "0 = random. Fixed = reproducible.", -1, 999999, p.seed)}
+      ${paramSlider("repeat_penalty", "Repeat penalty", "Discourages repetition. 1.0 = off.", 1, 1.5, 0.01, p.repeat_penalty)}
     </div>
     <span class="adv-toggle" id="adv-toggle" onclick="toggleAdv()">+ Advanced</span>
     <div class="params-adv" id="params-adv">
-      ${paramNumber('num_predict','Max tokens','Output length. -1 = unlimited.',-1,4096,p.num_predict)}
-      ${paramSlider('min_p','Min P','Min probability vs top token.',0,.2,.01,p.min_p)}
-      ${paramNumber('repeat_last_n','Repeat last N','Repetition check window.',0,512,p.repeat_last_n)}
-      ${paramSlider('presence_penalty','Presence penalty','Penalise seen tokens.',0,1,.05,p.presence_penalty)}
-      ${paramSlider('frequency_penalty','Frequency penalty','Penalise frequent tokens.',0,1,.05,p.frequency_penalty)}
+      ${paramNumber("num_predict", "Max tokens", "Output length. -1 = unlimited.", -1, 4096, p.num_predict)}
+      ${paramSlider("min_p", "Min P", "Min probability vs top token.", 0, 0.2, 0.01, p.min_p)}
+      ${paramNumber("repeat_last_n", "Repeat last N", "Repetition check window.", 0, 512, p.repeat_last_n)}
+      ${paramSlider("presence_penalty", "Presence penalty", "Penalise seen tokens.", 0, 1, 0.05, p.presence_penalty)}
+      ${paramSlider("frequency_penalty", "Frequency penalty", "Penalise frequent tokens.", 0, 1, 0.05, p.frequency_penalty)}
     </div>
   </div>
   </section>
@@ -1587,12 +2305,19 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   <div id="fixedLogResizer" class="fixed-log-resizer" title="Drag to resize output window"></div>
   <section class="fixed-log-panel">
     <div class="fixed-log-head">
-      <div class="fixed-log-title">Router log <span class="fixed-log-count">(<span id="fixedLogCount">0</span>)</span></div>
+      <div class="fixed-log-head-main">
+        <div class="fixed-log-title">Router log <span class="fixed-log-count">(<span id="fixedLogCount">0</span>)</span></div>
+        <div class="fixed-log-stats" aria-label="Routing counters">
+          <span class="fixed-log-stat local"><strong id="cnt-local">0</strong> Local</span>
+          <span class="fixed-log-stat cloud"><strong id="cnt-cloud">0</strong> Cloud</span>
+          <span class="fixed-log-stat total"><strong id="cnt-total">0</strong> Total</span>
+        </div>
+      </div>
       <div class="fixed-log-tools">
         <button type="button" id="fixedLogToggleBtn" class="fixed-log-toggle" title="Collapse footer">Collapse</button>
       </div>
     </div>
-    <div id="fixedLogOutput" class="fixed-log-output"></div>
+    <div id="fixedLogOutput" class="fixed-log-output"><div class="fixed-log-empty" id="fixedLogEmpty">No routing events yet.</div></div>
   </section>
 </footer>
 
@@ -1738,15 +2463,41 @@ requestAnimationFrame(function(){ requestAnimationFrame(syncHdrStickyOffset); })
 
 // ── Sparkline ──────────────────────────────────────────────────────────────
 var routingMode=${jsonForInlineScript(routingModeInitial)};
-function applyRoutingModeButton(m){
+var cloudQuotaUiState={exceeded:false,message:'',at:0,disabled_modes:[]};
+function routingModeLabelFor(mode){
+  return mode==='cloud'?'Claude only':mode==='local'?'Ollama only':'Hybrid';
+}
+function routingModeSubLabelFor(mode){
+  return mode==='cloud'?'Claude API':mode==='local'?'Always local':'Smart local + Claude';
+}
+function applyRoutingModeButton(m, quota){
   var s=String(m||'').trim().toLowerCase();
   if(s!=='cloud'&&s!=='local'&&s!=='hybrid')s='hybrid';
   routingMode=s;
-  var b=document.getElementById('routing-mode-btn');
-  if(!b)return;
-  b.className='routing-mode-btn routing-mode-btn--section routing-mode--'+s;
-  b.textContent=s==='cloud'?'Claude only':s==='local'?'Ollama only':'Hybrid';
-  b.setAttribute('aria-label','Routing mode: '+(s==='cloud'?'Claude API only':s==='local'?'Ollama only':'Hybrid (smart local + Claude when needed)'));
+  cloudQuotaUiState=quota&&quota.exceeded?quota:{exceeded:false,message:'',at:0,disabled_modes:[]};
+  ['hybrid','cloud','local'].forEach(function(mode){
+    var b=document.getElementById('routing-mode-btn-'+mode);
+    if(!b)return;
+    var disabled=!!(cloudQuotaUiState.exceeded&&(mode==='hybrid'||mode==='cloud'));
+    var active=!disabled&&mode===s;
+    b.className='routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--'+mode+(active?' is-active':'')+(disabled?' is-disabled':'');
+    b.disabled=disabled;
+    b.innerHTML='<span class="routing-mode-btn-main">'+routingModeLabelFor(mode)+'</span><span class="routing-mode-btn-sub">'+(disabled?'Quotas exceeded':(active?'Active':routingModeSubLabelFor(mode)))+'</span>';
+    b.setAttribute('aria-label','Routing mode: '+routingModeLabelFor(mode)+(disabled?' (quotas exceeded)':''));
+    b.setAttribute('aria-pressed',active?'true':'false');
+    b.title=disabled?(routingModeLabelFor(mode)+' unavailable: quotas exceeded'):(active?(routingModeLabelFor(mode)+' active'):'Switch to '+routingModeLabelFor(mode));
+  });
+  var status=document.getElementById('routing-mode-status');
+  if(status){
+    if(cloudQuotaUiState.exceeded){
+      var msg=cloudQuotaUiState.message?statEsc(cloudQuotaUiState.message):'Cloud quota exceeded';
+      status.innerHTML='<strong>Cloud quotas exceeded.</strong> Claude and Hybrid are temporarily disabled, and requests are routed to Ollama local by default.<br><span>'+msg+'</span>';
+      status.className='routing-mode-status is-visible';
+    }else{
+      status.textContent='';
+      status.className='routing-mode-status';
+    }
+  }
 }
 /** Same pattern as ollama-dashboard app/static/js/main.js (timelineData + drawTimeline): fixed canvas width/height attrs, draw on each stats fetch. */
 const sparkData={cpu:[],ram:[],vram:[],gpu:[]};
@@ -1878,11 +2629,6 @@ async function refreshHealth(){
       if(text) text.textContent='Unhealthy'+(d.error?' \u00b7 '+d.error:'');
       if(rdot) rdot.className='rdot err';
     }
-    const running=d.status==='healthy';
-    const bs=document.getElementById('btn-start'), bt=document.getElementById('btn-stop'), br=document.getElementById('btn-restart');
-    if(bs) bs.disabled=running;
-    if(bt) bt.disabled=!running;
-    if(br) br.disabled=!running;
     _healthPollGen++;
     const chip=document.getElementById('chip-ollama');
     if(chip && d.ollama_version && (_healthPollGen%8===1 || !chip.textContent||chip.textContent==='Ollama')){
@@ -1894,20 +2640,6 @@ async function refreshHealth(){
     if(badge) badge.className='health-badge unhealthy';
     if(text) text.textContent=(e&&e.name==='AbortError')?'Router not responding (timeout)':'Health check failed';
     if(rdot) rdot.className='rdot err';
-  }
-}
-
-async function svcAction(action){
-  const btns=['btn-start','btn-stop','btn-restart'];
-  btns.forEach(id=>{ const b=document.getElementById(id); if(b)b.disabled=true; });
-  try{
-    await routerFetch('/api/service/'+action,{method:'POST'});
-    await new Promise(r=>setTimeout(r,2000));
-    await refreshHealth();
-    await refreshModel();
-    await refreshOllamaModelList();
-  }finally{
-    // re-enable based on actual state (refreshHealth sets them)
   }
 }
 
@@ -2188,9 +2920,9 @@ function buildVramLoadedCard(col, row, d){
   specs.appendChild(mkRow(specItem('\u{1F4BE}','Size',fmtBytes(sz)),specItem('\u{1F4A0}','GPU Allocation',gpuTxt)));
   specs.appendChild(mkRow(specItem('\u{1F4C8}','Max context',fmtCtxTok(ctxMax)),specItem('\u2194','Allocated',fmtCtxTok(ctxAlloc))));
 
-  /* ── Action buttons (Ollama Dashboard style: Restart / Stop / Info / Settings+Default / …) ── */
+  /* ── Action buttons (monitoring only: Info / Settings) ── */
   const actions=document.createElement('div');
-  actions.className='model-actions model-actions--running hybrid-model-actions-5';
+  actions.className='model-actions model-actions--running hybrid-model-actions-2';
   function mcBtn(cls,iconCls,label,title,handler){
     const b=document.createElement('button');
     b.type='button'; b.className='btn '+cls; b.title=title;
@@ -2198,8 +2930,6 @@ function buildVramLoadedCard(col, row, d){
     b.addEventListener('click',handler);
     return b;
   }
-  actions.appendChild(mcBtn('btn-primary','fa-redo','Restart','Reload this model in VRAM (applies updated settings)',()=>cardModelAction('/api/router/model/restart',name)));
-  actions.appendChild(mcBtn('btn-warning','fa-stop','Stop','Unload from VRAM (ollama stop)',()=>cardModelAction('/api/router/model/stop',name)));
   actions.appendChild(mcBtn('btn-info','fa-info-circle','Info','Model details (JSON)',()=>openCardModelInfo(name)));
   const settingsBtn=document.createElement('button');
   settingsBtn.type='button';
@@ -2208,30 +2938,12 @@ function buildVramLoadedCard(col, row, d){
   settingsBtn.innerHTML='<span class="model-action-settings-inner"><i class="fas fa-cog" aria-hidden="true"></i> <span class="model-action-btn-label">Settings</span>'
     +'<span class="badge rounded-pill model-settings-badge model-settings-badge--'+(isDefault?'default':'set')+'">'
     +(isDefault?'Default':'')+'</span></span>';
-  settingsBtn.addEventListener('click',()=>openSettingsModal());
+  settingsBtn.addEventListener('click',()=>openSettingsModal(name));
   actions.appendChild(settingsBtn);
-
-  /* "…" overflow menu */
-  const moreMenu=document.createElement('div');
-  moreMenu.className='model-card-more-menu';
-  moreMenu.hidden=true;
-  function mmItem(label,handler){
-    const b=document.createElement('button'); b.type='button'; b.textContent=label;
-    b.addEventListener('click',handler); return b;
-  }
-  moreMenu.appendChild(mmItem('Copy model name',()=>navigator.clipboard.writeText(name)));
-  moreMenu.appendChild(mmItem('Copy ollama run',()=>navigator.clipboard.writeText('ollama run '+name)));
-  if(!isDefault){
-    moreMenu.appendChild(document.createElement('hr'));
-    moreMenu.appendChild(mmItem('Set as default model',()=>setAsDefaultModel(name)));
-  }
-  const moreBtn=mcBtn('btn-outline-secondary','fa-ellipsis-h','','More options',()=>{ moreMenu.hidden=!moreMenu.hidden; });
-  actions.appendChild(moreBtn);
 
   card.appendChild(head);
   card.appendChild(specs);
   card.appendChild(actions);
-  card.appendChild(moreMenu);
   col.appendChild(card);
 }
 /** Compact empty state when Ollama has nothing in GPU memory (no fake “model card”). */
@@ -2245,8 +2957,8 @@ function buildVramEmptyState(root, d){
   const sub=document.createElement('div');
   sub.className='vram-empty-sub';
   const cfg=String(d.configured_model||'').trim();
-  if(cfg) sub.textContent='Press Start to load your model and begin using local AI.';
-  else sub.textContent='Choose a model above, then press Start.';
+  if(cfg) sub.textContent='The dashboard is monitoring Ollama. Start the configured model from Ollama when you want to use local AI.';
+  else sub.textContent='Choose a default model above. This dashboard monitors status and settings but does not start or stop Ollama.';
   wrap.appendChild(title);
   wrap.appendChild(sub);
   root.appendChild(wrap);
@@ -2264,7 +2976,7 @@ function buildVramConfiguredIdleAside(root, d){
   head.className='model-header model-card-head';
   const t=document.createElement('div');
   t.className='model-card-head-body';
-  t.innerHTML='<div class="model-card-head-name-row"><div class="model-title"><span class="model-title-display"><span class="model-title-full"></span></span></div><div class="model-meta"><span class="status-indicator available"><span>Default · not in VRAM</span></span></div></div>';
+  t.innerHTML='<div class="model-card-head-name-row"><div class="model-title"><span class="model-title-display"><span class="model-title-full"></span></span></div><div class="model-meta"><span class="status-indicator available"><span>Default</span></span></div></div>';
   t.querySelector('.model-title-full').textContent=cfg;
   head.innerHTML='<div class="model-icon-wrapper" aria-hidden="true"><span class="model-icon-main"><i class="fas fa-sliders-h" aria-hidden="true"></i></span></div>';
   head.appendChild(t);
@@ -2282,6 +2994,98 @@ function buildVramConfiguredIdleAside(root, d){
   col.appendChild(card);
   root.appendChild(col);
 }
+function buildVramPoolCard(root, row){
+  if(!root||!row||!row.name)return;
+  const col=document.createElement('div');
+  col.className='col';
+  col.setAttribute('role','listitem');
+  const card=document.createElement('div');
+  card.className='model-card h-100 unloaded';
+  card.dataset.modelName=row.name;
+  const isDefault=!!row.is_default;
+  const caps=row.capabilities||{};
+  const cs=row.card_specs||{};
+
+  const head=document.createElement('div');
+  head.className='model-header model-card-head';
+  const iw=document.createElement('div');
+  iw.className='model-icon-wrapper';
+  iw.setAttribute('aria-hidden','true');
+  iw.innerHTML='<span class="model-icon-main"><i class="fas fa-cube" aria-hidden="true"></i></span>';
+  const hbody=document.createElement('div');
+  hbody.className='model-card-head-body';
+  const nr=document.createElement('div');
+  nr.className='model-card-head-name-row';
+  const titleEl=document.createElement('div');
+  titleEl.className='model-title';
+  titleEl.innerHTML='<span class="model-title-display"><span class="model-title-full"></span></span>';
+  titleEl.querySelector('.model-title-full').textContent=row.name;
+  const trail=document.createElement('div');
+  trail.className='model-card-head-trail';
+  const meta=document.createElement('div');
+  meta.className='model-meta';
+  const pill=document.createElement('span');
+  pill.className='status-indicator available';
+  pill.innerHTML='<span>'+(isDefault?'Default · ':'')+'In pool</span>';
+  meta.appendChild(pill);
+  trail.appendChild(meta);
+  const aside=document.createElement('div');
+  aside.className='model-card-head-aside';
+  aside.setAttribute('aria-label','Capabilities');
+  const capsDiv=document.createElement('div');
+  capsDiv.className='model-capabilities';
+  const capDefs=[['has_reasoning','fa-brain','Reasoning'],['has_vision','fa-image','Vision'],['has_tools','fa-tools','Tools']];
+  for(const [key,icon,label] of capDefs){
+    const sp=document.createElement('span');
+    const v=caps[key];
+    sp.className='capability-icon '+(v===true?'enabled':v===false?'disabled':'unknown');
+    sp.title=label+': '+(v===true?'Available':v===false?'Not available':'Unknown');
+    sp.innerHTML='<i class="fas '+icon+'" aria-hidden="true"></i>';
+    capsDiv.appendChild(sp);
+  }
+  aside.appendChild(capsDiv);
+  trail.appendChild(aside);
+  nr.appendChild(titleEl);
+  nr.appendChild(trail);
+  hbody.appendChild(nr);
+  head.appendChild(iw);
+  head.appendChild(hbody);
+
+  const specs=document.createElement('div');
+  specs.className='model-specs';
+  const mkRow=(a,b)=>{ const r=document.createElement('div'); r.className='spec-row'; r.appendChild(a); r.appendChild(b); return r; };
+  specs.appendChild(mkRow(specItem('\u2699','Family',cs.family||'\u2014'),specItem('\u2696','Parameters',cs.parameter_size||'\u2014')));
+  specs.appendChild(mkRow(specItem('\u{1F4BE}','Size',fmtBytes(row.size)),specItem('\u{1F4C8}','Max context',fmtCtxTok(row.context_max))));
+  specs.appendChild(mkRow(specItem('\u26A1','Router request',fmtCtxTok(row.request_num_ctx)),specItem('\u2194','Allocated','\u2014')));
+
+  const actions=document.createElement('div');
+  actions.className='model-actions model-actions--running hybrid-model-actions-2';
+  function mcBtn(cls,iconCls,label,title,handler){
+    const b=document.createElement('button');
+    b.type='button';
+    b.className='btn '+cls;
+    b.title=title;
+    b.innerHTML='<i class="fas '+iconCls+'" aria-hidden="true"></i> <span class="model-action-btn-label">'+label+'</span>';
+    b.addEventListener('click',handler);
+    return b;
+  }
+  actions.appendChild(mcBtn('btn-info','fa-info-circle','Info','Model details (JSON)',()=>openCardModelInfo(row.name)));
+  const settingsBtn=document.createElement('button');
+  settingsBtn.type='button';
+  settingsBtn.className='btn btn-secondary model-action-settings-btn';
+  settingsBtn.title='Generation settings';
+  settingsBtn.innerHTML='<span class="model-action-settings-inner"><i class="fas fa-cog" aria-hidden="true"></i> <span class="model-action-btn-label">Settings</span>'
+    +'<span class="badge rounded-pill model-settings-badge model-settings-badge--'+(isDefault?'default':'set')+'">'
+    +(isDefault?'Default':'')+'</span></span>';
+  settingsBtn.addEventListener('click',()=>openSettingsModal(row.name));
+  actions.appendChild(settingsBtn);
+
+  card.appendChild(head);
+  card.appendChild(specs);
+  card.appendChild(actions);
+  col.appendChild(card);
+  root.appendChild(col);
+}
 function renderVramSection(d){
   const root=document.getElementById('vram-cards-root');
   const hint=document.getElementById('vram-default-hint');
@@ -2292,8 +3096,9 @@ function renderVramSection(d){
     hint.textContent='';
   }
   const list=Array.isArray(d.loaded_list)?d.loaded_list:[];
+  const poolList=Array.isArray(d.pool_models)?d.pool_models:[];
   const cfg=d.configured_model||'';
-  if(list.length===0){
+  if(list.length===0&&poolList.length===0){
     buildVramEmptyState(root, d);
     if(hint){
       hint.textContent='';
@@ -2309,10 +3114,15 @@ function renderVramSection(d){
     buildVramLoadedCard(col, row, d);
     root.appendChild(col);
   }
-  if(!d.configured_loaded&&cfg){
-    buildVramConfiguredIdleAside(root, d);
-    if(hint){
-      hint.textContent='Your default model is not the one loaded above; routing may use a different name until you align them.';
+  for(const row of poolList){
+    buildVramPoolCard(root, row);
+  }
+  if(hint){
+    if(list.length===0&&poolList.length>0){
+      hint.textContent='No pooled model is currently loaded in VRAM. Settings and model details remain available below.';
+      hint.style.display='block';
+    }else if(!d.configured_loaded&&cfg){
+      hint.textContent='Loaded models are highlighted. Unloaded pooled models stay available below for monitoring and settings.';
       hint.style.display='block';
     }
   }
@@ -2636,8 +3446,9 @@ function attachSettingsTableListeners(){
     inp.addEventListener('input',()=>updateSettingsEffectiveCell(key));
   });
 }
-async function refreshParamsFullAndRender(){
-  const r=await fetch('/api/model-params-full');
+async function refreshParamsFullAndRender(modelName){
+  const query=modelName?'?model='+encodeURIComponent(modelName):'';
+  const r=await fetch('/api/model-params-full'+query);
   const d=await r.json();
   window.__paramsFull=d;
   const tb=document.getElementById('settings-diff-tbody');
@@ -2724,7 +3535,7 @@ async function saveGlobalFromSettingsModal(){
   if(!r.ok){ await alertFailedSave(r,'Save global'); return; }
   const msg=document.getElementById('settings-saved-global-msg');
   if(msg){ msg.style.opacity=1; setTimeout(()=>{ msg.style.opacity=0; },2200); }
-  await refreshParamsFullAndRender();
+  await refreshParamsFullAndRender(d.active_model);
   await refreshModel();
 }
 function collectPerModelOverrides(){
@@ -2749,7 +3560,7 @@ async function savePerModelOverrides(){
   if(!r.ok){ await alertFailedSave(r,'Save model overrides'); return; }
   const msg=document.getElementById('settings-saved-per-msg');
   if(msg){ msg.style.opacity=1; setTimeout(()=>msg.style.opacity=0,2200); }
-  await refreshParamsFullAndRender();
+  await refreshParamsFullAndRender(d.active_model);
   await refreshModel();
 }
 async function clearPerModelOverrides(){
@@ -2757,11 +3568,11 @@ async function clearPerModelOverrides(){
   if(!d)return;
   const r=await routerFetch('/api/model-params-per-model',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:d.active_model,overrides:{}})});
   if(!r.ok){ await alertFailedSave(r,'Clear overrides'); return; }
-  await refreshParamsFullAndRender();
+  await refreshParamsFullAndRender(d.active_model);
   await refreshModel();
 }
-async function openSettingsModal(){
-  try{ await refreshParamsFullAndRender(); }catch{}
+async function openSettingsModal(modelName){
+  try{ await refreshParamsFullAndRender(modelName); }catch{}
   document.getElementById('settings-modal').hidden=false;
 }
 
@@ -2870,6 +3681,8 @@ const FOOTER_MAX_RATIO=.7;
 const FOOTER_COLLAPSED_H=46;
 let footerCollapsed=false;
 let footerExpandedHeight=260;
+const seenFooterLogIds=new Set();
+const seenFooterLogOrder=[];
 
 function escHtml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -2882,12 +3695,13 @@ function footerAtBottom(el){
 function appendFooterLog(e){
   const out=document.getElementById('fixedLogOutput');
   if(!out||!e)return;
+  document.getElementById('fixedLogEmpty')?.remove();
   const stick=footerAtBottom(out);
   const dest=(e.fallback?'fallback':(e.dest||'local')).toLowerCase();
   const label=dest==='cloud'?'CLOUD':(dest==='fallback'?'FALLBACK':'LOCAL');
   const line=document.createElement('div');
   line.className='fixed-log-line';
-  const lm=e.local_model?(' \u2192 '+escHtml(e.local_model)):'';
+  const lm=(e.local_model||e.cloud_model)?(' \u2192 '+escHtml(e.local_model||e.cloud_model)):'';
   line.innerHTML='['+escHtml(e.time||'--:--:--')+'] <span class="'+dest+'">'+label+'</span> - '+escHtml(e.reason||'')+lm;
   out.appendChild(line);
   while(out.children.length>MAX_FOOTER_LOG_LINES){out.removeChild(out.firstChild);}
@@ -2984,18 +3798,19 @@ function statEsc(s){
 function addEntry(e){
   try{
     if(!e||typeof e!=='object')return;
-    document.getElementById('empty')?.remove();
+    const entryId=e.id;
+    if(entryId!=null){
+      const key=String(entryId);
+      if(seenFooterLogIds.has(key))return;
+      seenFooterLogIds.add(key);
+      seenFooterLogOrder.push(key);
+      while(seenFooterLogOrder.length>MAX_FOOTER_LOG_LINES*3){
+        const oldest=seenFooterLogOrder.shift();
+        if(oldest!=null)seenFooterLogIds.delete(oldest);
+      }
+    }
     const rawDest=e.dest!=null&&String(e.dest).trim()!==''?String(e.dest).trim():'local';
     const destNorm=rawDest.toLowerCase()==='cloud'?'cloud':'local';
-    const dest=e.fallback?'fallback':destNorm;
-    const label=e.fallback?'FALLBACK':destNorm.toUpperCase();
-    const logContainer=document.getElementById('log');
-    if(logContainer){
-      const div=document.createElement('div');
-      div.className='entry '+dest;
-      div.innerHTML='<span class="etime">'+statEsc(e.time)+'</span><span class="badge '+dest+'">'+label+'</span><span class="reason">'+statEsc(e.reason)+'</span>';
-      logContainer.prepend(div);
-    }
     if(!e.fallback){ if(destNorm==='local')lc++; else cc++; }
     const cntLocal=document.getElementById('cnt-local');
     const cntCloud=document.getElementById('cnt-cloud');
@@ -3057,9 +3872,18 @@ function hydrateLogEntriesBatched(raw){
     if(list.length) requestAnimationFrame(step);
   }catch(_){}
 }
+async function hydrateFooterLogsFromApi(){
+  try{
+    const r=await fetchWithTimeout('/api/logs',12000);
+    if(!r.ok)return;
+    const j=await r.json();
+    hydrateLogEntriesBatched(j&&Array.isArray(j.logs)?j.logs:[]);
+  }catch(_){ }
+}
 initDashboardPollTicker();
 initSystemStatsPoller();
 try{ hydrateLogEntriesBatched((${jsonForInlineScript(log)}||[])); }catch(_){}
+void hydrateFooterLogsFromApi();
 const es=new EventSource('/events');
 es.onmessage=function(ev){
   try{
@@ -3073,7 +3897,7 @@ async function refreshRouteStats(){
     const r=await fetchWithTimeout('/api/stats',12000);
     if(!r.ok)return;
     const j=await r.json();
-    if(j.config&&j.config.routing_mode!=null)applyRoutingModeButton(j.config.routing_mode);
+    if(j.config&&j.config.routing_mode!=null)applyRoutingModeButton(j.config.routing_mode,j.cloud_quota);
     const lr=j.last_route;
     const bar=document.getElementById('last-route-bar');
     const tx=document.getElementById('last-route-text');
@@ -3107,7 +3931,7 @@ async function doRefresh(syncGenerationSliders){
       }),
     ]);
   }catch(e){
-    if(e&&e.name==='DashboardRefreshTimeout') console.warn('Claude Hybrid: dashboard refresh timed out; UI stays usable.');
+    if(e&&e.name==='DashboardRefreshTimeout') console.warn('ClaudeLlama: dashboard refresh timed out; UI stays usable.');
     else console.error(e);
   }
 }
@@ -3135,7 +3959,7 @@ async function runCoalescedDashboardRefresh(forceFull){
       }else{
         dashRefreshNeedFull=false;
         dashRefreshTailPasses=0;
-        console.warn('Claude Hybrid: stopped chained dashboard refresh (safety cap).');
+        console.warn('ClaudeLlama: stopped chained dashboard refresh (safety cap).');
       }
     }
   }
@@ -3157,20 +3981,20 @@ function scheduleDashboardBootstrap(){
 scheduleDashboardBootstrap();
 initFooterResizer();
 
-document.getElementById('routing-mode-btn')?.addEventListener('click',async function(){
-  var order=['hybrid','cloud','local'];
-  var i=order.indexOf(routingMode);
-  if(i<0)i=0;
-  var next=order[(i+1)%3];
-  try{
-    var r=await routerFetch('/api/router/routing-mode',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:next})});
-    if(!r.ok){
-      try{var j=await r.json();alert(j.error||j.hint||('HTTP '+r.status));}catch{alert('HTTP '+r.status);}
-      return;
-    }
-    var d=await r.json();
-    if(d&&d.mode)applyRoutingModeButton(d.mode);
-  }catch{alert('Could not change routing mode');}
+document.querySelectorAll('[id^="routing-mode-btn-"][data-mode]')?.forEach(function(btn){
+  btn.addEventListener('click',async function(){
+    var next=String(btn.getAttribute('data-mode')||'').trim().toLowerCase();
+    if(!next||next===routingMode||btn.disabled)return;
+    try{
+      var r=await routerFetch('/api/router/routing-mode',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:next})});
+      if(!r.ok){
+        try{var j=await r.json();alert(j.error||j.hint||('HTTP '+r.status));}catch{alert('HTTP '+r.status);}
+        return;
+      }
+      var d=await r.json();
+      if(d&&d.mode)applyRoutingModeButton(d.mode,cloudQuotaUiState);
+    }catch{alert('Could not change routing mode');}
+  });
 });
 
 document.getElementById('local-model-select')?.addEventListener('change',async (e)=>{
@@ -3256,71 +4080,87 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeModelInfoMod
 const server = http.createServer(async (req, res) => {
   const reqPath = pathOnly(req.url);
 
-  if (req.method === 'GET' && reqPath === '/assets/dashboard-extra.css') {
-    const cssPath = path.join(CFG.resourcesDir, 'dashboard-extra.css');
+  if (req.method === "GET" && reqPath === "/assets/dashboard-extra.css") {
+    const cssPath = path.join(CFG.resourcesDir, "dashboard-extra.css");
     if (!fs.existsSync(cssPath)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('not found');
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
       return;
     }
     try {
-      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
-      res.end(fs.readFileSync(cssPath, 'utf8'));
+      res.writeHead(200, {
+        "Content-Type": "text/css; charset=utf-8",
+        "Cache-Control": "public, max-age=3600",
+      });
+      res.end(fs.readFileSync(cssPath, "utf8"));
     } catch {
       res.writeHead(500).end();
     }
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/assets/ollama-dashboard-model-card.css') {
-    const cssPath = path.join(CFG.resourcesDir, 'ollama-dashboard-model-card.css');
+  if (
+    req.method === "GET" &&
+    reqPath === "/assets/ollama-dashboard-model-card.css"
+  ) {
+    const cssPath = path.join(
+      CFG.resourcesDir,
+      "ollama-dashboard-model-card.css",
+    );
     if (!fs.existsSync(cssPath)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('not found');
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
       return;
     }
     try {
-      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
-      res.end(fs.readFileSync(cssPath, 'utf8'));
+      res.writeHead(200, {
+        "Content-Type": "text/css; charset=utf-8",
+        "Cache-Control": "public, max-age=3600",
+      });
+      res.end(fs.readFileSync(cssPath, "utf8"));
     } catch {
       res.writeHead(500).end();
     }
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/assets/ollama-logo.png') {
-    const logoPath = CFG.ollamaLogoCandidates.find(p => fs.existsSync(p));
+  if (req.method === "GET" && reqPath === "/assets/ollama-logo.png") {
+    const logoPath = CFG.ollamaLogoCandidates.find((p) => fs.existsSync(p));
     if (!logoPath) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'logo not found' }));
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "logo not found" }));
       return;
     }
     try {
       const data = fs.readFileSync(logoPath);
       res.writeHead(200, {
-        'Content-Type': 'image/png',
-        'Cache-Control': 'public, max-age=3600',
+        "Content-Type": "image/png",
+        "Cache-Control": "public, max-age=3600",
       });
       res.end(data);
     } catch {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'logo read failed' }));
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "logo read failed" }));
     }
     return;
   }
 
-  if (req.method === 'GET' && (reqPath === '/assets/claude-code-icon.svg' || reqPath === '/assets/claude-icon.svg')) {
-    const iconPath = path.join(__dirname, 'public', 'claude-code-icon.svg');
+  if (
+    req.method === "GET" &&
+    (reqPath === "/assets/claude-code-icon.svg" ||
+      reqPath === "/assets/claude-icon.svg")
+  ) {
+    const iconPath = path.join(__dirname, "public", "claude-code-icon.svg");
     if (!fs.existsSync(iconPath)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('not found');
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
       return;
     }
     try {
       const data = fs.readFileSync(iconPath);
       res.writeHead(200, {
-        'Content-Type': 'image/svg+xml; charset=utf-8',
-        'Cache-Control': 'public, max-age=86400',
+        "Content-Type": "image/svg+xml; charset=utf-8",
+        "Cache-Control": "public, max-age=86400",
       });
       res.end(data);
     } catch {
@@ -3329,183 +4169,241 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/header-ui') {
+  if (req.method === "GET" && reqPath === "/header-ui") {
     try {
-      const uiPath = path.join(__dirname, 'public', 'header-ui.html');
-      const html = fs.readFileSync(uiPath, 'utf8');
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      const uiPath = path.join(__dirname, "public", "header-ui.html");
+      const html = fs.readFileSync(uiPath, "utf8");
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(html);
     } catch {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'header ui unavailable' }));
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "header ui unavailable" }));
     }
     return;
   }
 
-  if (req.method === 'GET' && (reqPath === '/' || reqPath === '')) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  if (req.method === "GET" && (reqPath === "/" || reqPath === "")) {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(dashboardHTML(CFG));
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/events') {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
-    res.write('\n'); clients.add(res); req.on('close', () => clients.delete(res));
+  if (req.method === "GET" && reqPath === "/events") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    res.write("\n");
+    for (const entry of log) {
+      try {
+        res.write(`data: ${JSON.stringify(entry)}\n\n`);
+      } catch {}
+    }
+    clients.add(res);
+    req.on("close", () => clients.delete(res));
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/logs') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+  if (req.method === "GET" && reqPath === "/api/logs") {
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ logs: log }));
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/stats') {
+  if (req.method === "GET" && reqPath === "/api/stats") {
     const counters = metrics.snapshot();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      counters,
-      last_route: metrics.getLastRoute(),
-      config: {
-        listenHost: CFG.listenHost,
-        port: CFG.port,
-        local_model: CFG.local.model,
-        fast_model: CFG.local.fast_model || undefined,
-        local_models_pool: CFG.local.models,
-        smart_routing: CFG.local.smart_routing,
-        tokenThreshold: CFG.routing.tokenThreshold,
-        fileReadThreshold: CFG.routing.fileReadThreshold,
-        keywordCount: CFG.routing.keywords.length,
-        routing_keywords: CFG.routing.keywords,
-        routing_mode: normalizeRoutingMode(CFG.routing.mode),
-      },
-    }));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        counters,
+        last_route: metrics.getLastRoute(),
+        cloud_quota: getCloudQuotaState(),
+        config: {
+          listenHost: CFG.listenHost,
+          port: CFG.port,
+          local_model: CFG.local.model,
+          fast_model: CFG.local.fast_model || undefined,
+          local_models_pool: CFG.local.models,
+          smart_routing: CFG.local.smart_routing,
+          tokenThreshold: CFG.routing.tokenThreshold,
+          fileReadThreshold: CFG.routing.fileReadThreshold,
+          keywordCount: CFG.routing.keywords.length,
+          routing_keywords: CFG.routing.keywords,
+          routing_mode: normalizeRoutingMode(CFG.routing.mode),
+          privacy_cloud_redaction: {
+            enabled: !!CFG.privacy.cloud_redaction.enabled,
+            redact_tool_results:
+              !!CFG.privacy.cloud_redaction.redact_tool_results,
+            redact_identifiers:
+              !!CFG.privacy.cloud_redaction.redact_identifiers,
+            custom_terms_count: Array.isArray(
+              CFG.privacy.cloud_redaction.custom_terms,
+            )
+              ? CFG.privacy.cloud_redaction.custom_terms.length
+              : 0,
+          },
+        },
+      }),
+    );
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/router/routing-mode') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+  if (req.method === "GET" && reqPath === "/api/router/routing-mode") {
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ mode: normalizeRoutingMode(CFG.routing.mode) }));
     return;
   }
 
-  if (req.method === 'POST' && reqPath === '/api/router/routing-mode') {
+  if (req.method === "POST" && reqPath === "/api/router/routing-mode") {
     if (!requireAdmin(req, res)) return;
     try {
-      const body = JSON.parse((await readBody(req)).toString() || '{}');
-      const next = saveRoutingMode(routerDir, body.mode);
+      const body = JSON.parse((await readBody(req)).toString() || "{}");
+      const requested = normalizeRoutingMode(body.mode);
+      if (getCloudQuotaState().exceeded && requested !== "local") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error: "cloud quotas exceeded",
+            hint: "Claude and Hybrid are temporarily disabled while the cloud quota is exceeded.",
+          }),
+        );
+        return;
+      }
+      const next = saveRoutingMode(routerDir, requested);
       CFG.routing.mode = next;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, mode: next }));
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'invalid body' }));
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "invalid body" }));
     }
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/ollama-models') {
+  if (req.method === "GET" && reqPath === "/api/ollama-models") {
     try {
-      const tags = await ollamaGet('/api/tags');
+      const tags = await ollamaGet("/api/tags");
       const ps = await ollamaGetPsWithRetry();
       let models = normalizeOllamaTagList(tags);
       if (tags !== null && models.length > 0) {
         models = await enrichModelListWithContextCap(models);
       }
-      const loaded_models = listPsModels(ps).map((row) => psModelId(row)).filter(Boolean);
+      const loaded_models = listPsModels(ps)
+        .map((row) => psModelId(row))
+        .filter(Boolean);
       const installedNames = models.map((m) => m.name);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        models,
-        loaded_models,
-        configured_model: CFG.local.model,
-        ollama_reachable: tags !== null,
-        pool: resolveLocalPool(CFG, installedNames),
-        smart_routing: CFG.local.smart_routing,
-      }));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          models,
+          loaded_models,
+          configured_model: CFG.local.model,
+          ollama_reachable: tags !== null,
+          pool: resolveLocalPool(CFG, installedNames),
+          smart_routing: CFG.local.smart_routing,
+        }),
+      );
     } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        models: [],
-        loaded_models: [],
-        configured_model: CFG.local.model,
-        ollama_reachable: false,
-        pool: [],
-        smart_routing: CFG.local.smart_routing,
-        error: e && e.message ? String(e.message) : 'ollama_models_failed',
-      }));
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          models: [],
+          loaded_models: [],
+          configured_model: CFG.local.model,
+          ollama_reachable: false,
+          pool: [],
+          smart_routing: CFG.local.smart_routing,
+          error: e && e.message ? String(e.message) : "ollama_models_failed",
+        }),
+      );
     }
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/router/local-routing-config') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      model: CFG.local.model,
-      models: CFG.local.models,
-      smart_routing: CFG.local.smart_routing,
-      fast_model: CFG.local.fast_model || '',
-    }));
-    return;
-  }
-
-  if (req.method === 'POST' && reqPath === '/api/router/local-routing-config') {
-    if (!requireAdmin(req, res)) return;
-    try {
-      const body = JSON.parse((await readBody(req)).toString() || '{}');
-      saveLocalRoutingSettings(routerDir, {
-        models: Array.isArray(body.models) ? body.models : undefined,
-        smart_routing: typeof body.smart_routing === 'boolean' ? body.smart_routing : undefined,
-        fast_model: typeof body.fast_model === 'string' ? body.fast_model : undefined,
-      });
-      loadAndApply(CFG, routerDir);
-      normalizeLocalCfg();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        ok: true,
+  if (req.method === "GET" && reqPath === "/api/router/local-routing-config") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
         model: CFG.local.model,
         models: CFG.local.models,
         smart_routing: CFG.local.smart_routing,
-        fast_model: CFG.local.fast_model || '',
-      }));
+        fast_model: CFG.local.fast_model || "",
+      }),
+    );
+    return;
+  }
+
+  if (req.method === "POST" && reqPath === "/api/router/local-routing-config") {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const body = JSON.parse((await readBody(req)).toString() || "{}");
+      saveLocalRoutingSettings(routerDir, {
+        models: Array.isArray(body.models) ? body.models : undefined,
+        smart_routing:
+          typeof body.smart_routing === "boolean"
+            ? body.smart_routing
+            : undefined,
+        fast_model:
+          typeof body.fast_model === "string" ? body.fast_model : undefined,
+      });
+      loadAndApply(CFG, routerDir);
+      normalizeLocalCfg();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          model: CFG.local.model,
+          models: CFG.local.models,
+          smart_routing: CFG.local.smart_routing,
+          fast_model: CFG.local.fast_model || "",
+        }),
+      );
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false }));
     }
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/health') {
+  if (req.method === "GET" && reqPath === "/api/health") {
     const HEALTH_BUDGET_MS = 3500;
     let body;
     try {
       body = await Promise.race([
         (async () => {
-          const [ps, ver] = await Promise.all([ollamaGetPsWithRetry(), getOllamaVersion()]);
+          const [ps, ver] = await Promise.all([
+            ollamaGetPsWithRetry(),
+            getOllamaVersion(),
+          ]);
           const healthy = ps !== null;
           return {
-            status: healthy ? 'healthy' : 'degraded',
+            status: healthy ? "healthy" : "degraded",
             ollama_version: ver,
             uptime_seconds: healthy ? Math.floor(process.uptime()) : 0,
           };
         })(),
         new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('health_timeout')), HEALTH_BUDGET_MS);
+          setTimeout(
+            () => reject(new Error("health_timeout")),
+            HEALTH_BUDGET_MS,
+          );
         }),
       ]);
     } catch {
       body = {
-        status: 'degraded',
+        status: "degraded",
         ollama_version: ollamaVersionCache,
         uptime_seconds: Math.floor(process.uptime()),
       };
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/system-stats') {
+  if (req.method === "GET" && reqPath === "/api/system-stats") {
     try {
       const cpu = await sampleCpuPercent();
       const rawRam = 1 - os.freemem() / os.totalmem();
@@ -3518,54 +4416,65 @@ const server = http.createServer(async (req, res) => {
         nv && nv.vram_total_mb > 0
           ? Math.round((nv.vram_used_mb / nv.vram_total_mb) * 100)
           : null;
-      const gpuPct = nv && Number.isFinite(nv.gpu_util) ? Math.round(nv.gpu_util) : null;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        cpu: Number.isFinite(cpu) ? cpu : null,
-        ram,
-        vram: vramPct,
-        gpu: gpuPct,
-        vram_used_gb: nv ? (nv.vram_used_mb / 1024).toFixed(1) : null,
-        vram_total_gb: nv ? (nv.vram_total_mb / 1024).toFixed(1) : null,
-      }));
+      const gpuPct =
+        nv && Number.isFinite(nv.gpu_util) ? Math.round(nv.gpu_util) : null;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          cpu: Number.isFinite(cpu) ? cpu : null,
+          ram,
+          vram: vramPct,
+          gpu: gpuPct,
+          vram_used_gb: nv ? (nv.vram_used_mb / 1024).toFixed(1) : null,
+          vram_total_gb: nv ? (nv.vram_total_mb / 1024).toFixed(1) : null,
+        }),
+      );
     } catch (e) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        cpu: null,
-        ram: null,
-        vram: null,
-        gpu: null,
-        vram_used_gb: null,
-        vram_total_gb: null,
-        error: e && e.message ? String(e.message) : 'system_stats_failed',
-      }));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          cpu: null,
+          ram: null,
+          vram: null,
+          gpu: null,
+          vram_used_gb: null,
+          vram_total_gb: null,
+          error: e && e.message ? String(e.message) : "system_stats_failed",
+        }),
+      );
     }
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/model-status') {
+  if (req.method === "GET" && reqPath === "/api/model-status") {
     const ps = await ollamaGetPsWithRetry();
     const psRows = listPsModels(ps);
     const running = pickRunningModel(ps, CFG.local.model);
     const showName = running ? psModelId(running) : CFG.local.model;
-    const show = await ollamaPost('/api/show', { model: showName });
+    const show = await ollamaPost("/api/show", { model: showName });
     const context_max = maxContextFromShow(show);
     const context_allocated = contextAllocatedFromPsRow(running);
-    const modelPayload = running ? (() => {
-      const m = mergeModelDetailsFromShow(running, show);
-      return { ...m, details: enrichDetailsFromModelInfo(m.details || {}, show) };
-    })() : null;
+    const modelPayload = running
+      ? (() => {
+          const m = mergeModelDetailsFromShow(running, show);
+          return {
+            ...m,
+            details: enrichDetailsFromModelInfo(m.details || {}, show),
+          };
+        })()
+      : null;
     const card_specs = buildCardSpecs(show, running);
     const loaded_list = [];
     for (const row of psRows) {
       const nm = psModelId(row);
       if (!nm) continue;
-      const rowShow = (nm === showName) ? show : await ollamaPost('/api/show', { model: nm });
+      const rowShow =
+        nm === showName ? show : await ollamaPost("/api/show", { model: nm });
       const rowSpecs = buildCardSpecs(rowShow, row);
       const rowCaps = capabilityFlagsFromShow(rowShow);
       loaded_list.push({
         name: nm,
-        model: String(row.model || row.name || '').trim(),
+        model: String(row.model || row.name || "").trim(),
         size: toFiniteNumberLoose(row.size),
         size_vram: toFiniteNumberLoose(row.size_vram),
         digest: row.digest != null ? String(row.digest) : null,
@@ -3576,121 +4485,179 @@ const server = http.createServer(async (req, res) => {
         request_num_ctx: effectiveParamsFor(nm).num_ctx,
       });
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const tags = await ollamaGet("/api/tags");
+    const installedModels = normalizeOllamaTagList(tags);
+    const installedByName = new Map(installedModels.map((m) => [m.name, m]));
+    const installedNames = installedModels.map((m) => m.name);
+    const pool = resolveLocalPool(CFG, installedNames);
+    const loadedNames = new Set(loaded_list.map((r) => r.name));
+    const pool_models = [];
+    for (const name of pool) {
+      if (loadedNames.has(name)) continue;
+      const tagMeta = installedByName.get(name) || { name, size: null };
+      const poolShow =
+        name === showName
+          ? show
+          : await ollamaPost("/api/show", { model: name });
+      const poolSpecs = buildCardSpecs(poolShow, {
+        model: name,
+        name,
+        size: tagMeta.size,
+        size_vram: null,
+        details: poolShow && poolShow.details ? poolShow.details : {},
+      });
+      pool_models.push({
+        name,
+        size: toFiniteNumberLoose(tagMeta.size),
+        card_specs: poolSpecs,
+        capabilities: capabilityFlagsFromShow(poolShow),
+        context_max: maxContextFromShow(poolShow),
+        request_num_ctx: effectiveParamsFor(name).num_ctx,
+        is_default: name === CFG.local.model,
+      });
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
     const effModel = running ? psModelId(running) : CFG.local.model;
     const eff = effectiveParamsFor(effModel);
     const configured_loaded = !!running;
-    res.end(JSON.stringify({
-      loaded: configured_loaded,
-      configured_loaded,
-      configured_model: CFG.local.model,
-      active_model: effModel,
-      loaded_list,
-      model: modelPayload,
-      card_specs,
-      context_max,
-      context_allocated,
-      request_num_ctx: eff.num_ctx,
-      capabilities: capabilityFlagsFromShow(show),
-    }));
+    res.end(
+      JSON.stringify({
+        loaded: configured_loaded,
+        configured_loaded,
+        configured_model: CFG.local.model,
+        active_model: effModel,
+        loaded_list,
+        pool_models,
+        model: modelPayload,
+        card_specs,
+        context_max,
+        context_allocated,
+        request_num_ctx: eff.num_ctx,
+        capabilities: capabilityFlagsFromShow(show),
+      }),
+    );
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/model-params-full') {
+  if (req.method === "GET" && reqPath === "/api/model-params-full") {
+    let requestedModel = "";
+    const q = req.url.indexOf("?");
+    if (q !== -1) {
+      const sp = new URLSearchParams(req.url.slice(q + 1));
+      requestedModel = String(sp.get("model") || "").trim();
+    }
     const ps = await ollamaGetPsWithRetry();
     const running = pickRunningModel(ps, CFG.local.model);
-    const activeModel = running ? psModelId(running) : CFG.local.model;
+    const activeModel =
+      requestedModel || (running ? psModelId(running) : CFG.local.model);
     const patch = getPartialOverride(activeModel);
     const effective = effectiveParamsFor(activeModel);
     const builtIn = builtInParamsForModel(activeModel);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      built_in: builtIn,
-      preset_patch: matchPresetPatch(activeModel),
-      global: globalLayerMerged(activeModel),
-      global_sparse: modelParams,
-      active_model: activeModel,
-      loaded: !!running,
-      per_model_patch: patch,
-      effective,
-      param_keys: Object.keys(PARAM_DEFAULTS),
-    }));
+    const loaded = !!listPsModels(ps).find(
+      (row) => psModelId(row) === activeModel,
+    );
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        built_in: builtIn,
+        preset_patch: matchPresetPatch(activeModel),
+        global: globalLayerMerged(activeModel),
+        global_sparse: modelParams,
+        active_model: activeModel,
+        loaded,
+        per_model_patch: patch,
+        effective,
+        param_keys: Object.keys(PARAM_DEFAULTS),
+      }),
+    );
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/router/model-details') {
+  if (req.method === "GET" && reqPath === "/api/router/model-details") {
     let modelName = CFG.local.model;
-    const q = req.url.indexOf('?');
+    const q = req.url.indexOf("?");
     if (q !== -1) {
       const sp = new URLSearchParams(req.url.slice(q + 1));
-      const m = sp.get('model');
+      const m = sp.get("model");
       if (m) modelName = m;
     }
-    const show = await ollamaPost('/api/show', { model: modelName });
+    const show = await ollamaPost("/api/show", { model: modelName });
     const eff = effectiveParamsFor(modelName);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      model: modelName,
-      summary: summarizeShow(show),
-      show,
-      global_options: globalLayerMerged(modelName),
-      per_model_patch: getPartialOverride(modelName),
-      router_request_options: eff,
-    }));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        model: modelName,
+        summary: summarizeShow(show),
+        show,
+        global_options: globalLayerMerged(modelName),
+        per_model_patch: getPartialOverride(modelName),
+        router_request_options: eff,
+      }),
+    );
     return;
   }
 
-  if (req.method === 'POST' && reqPath === '/api/local-model') {
+  if (req.method === "POST" && reqPath === "/api/local-model") {
     if (!requireAdmin(req, res)) return;
     let body = {};
     try {
-      body = JSON.parse((await readBody(req)).toString() || '{}');
+      body = JSON.parse((await readBody(req)).toString() || "{}");
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'invalid json' }));
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "invalid json" }));
       return;
     }
     const name = body.model;
-    if (!name || typeof name !== 'string' || !String(name).trim()) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'model name required' }));
+    if (!name || typeof name !== "string" || !String(name).trim()) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "model name required" }));
       return;
     }
     saveLocalModel(routerDir, name.trim());
     loadAndApply(CFG, routerDir);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, model: CFG.local.model }));
     return;
   }
 
-  if (req.method === 'POST' && reqPath === '/api/router/model/stop') {
+  if (req.method === "POST" && reqPath === "/api/router/model/stop") {
     if (!requireAdmin(req, res)) return;
     let body = {};
-    try { body = JSON.parse((await readBody(req)).toString() || '{}'); } catch { body = {}; }
+    try {
+      body = JSON.parse((await readBody(req)).toString() || "{}");
+    } catch {
+      body = {};
+    }
     const ps = await ollamaGetPsWithRetry();
     const explicit = body.model && String(body.model).trim();
     const matched = pickRunningModel(ps, CFG.local.model);
     const fallback = matched || firstLoadedPsRow(ps);
-    const name = explicit || (fallback && psModelId(fallback)) || CFG.local.model;
+    const name =
+      explicit || (fallback && psModelId(fallback)) || CFG.local.model;
     await ollamaTouchModel(name, 0);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, model: name }));
     return;
   }
 
-  if (req.method === 'POST' && reqPath === '/api/router/model/start') {
+  if (req.method === "POST" && reqPath === "/api/router/model/start") {
     if (!requireAdmin(req, res)) return;
     const name = CFG.local.model;
     await ollamaTouchModel(name, -1);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    lastLocalActivityMs = Date.now();
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, model: name }));
     return;
   }
 
-  if (req.method === 'POST' && reqPath === '/api/router/model/restart') {
+  if (req.method === "POST" && reqPath === "/api/router/model/restart") {
     if (!requireAdmin(req, res)) return;
     let body = {};
-    try { body = JSON.parse((await readBody(req)).toString() || '{}'); } catch { body = {}; }
+    try {
+      body = JSON.parse((await readBody(req)).toString() || "{}");
+    } catch {
+      body = {};
+    }
     const explicit = body.model && String(body.model).trim();
     const target = explicit || CFG.local.model;
     const ps = await ollamaGetPsWithRetry();
@@ -3698,159 +4665,206 @@ const server = http.createServer(async (req, res) => {
     const row = matched || firstLoadedPsRow(ps);
     if (row) {
       await ollamaTouchModel(psModelId(row), 0);
-      await new Promise(r => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, 800));
     }
     await ollamaTouchModel(target, -1);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    lastLocalActivityMs = Date.now();
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, model: target }));
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/model-params') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+  if (req.method === "GET" && reqPath === "/api/model-params") {
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(globalLayerMerged(CFG.local.model)));
     return;
   }
 
-  if (req.method === 'POST' && reqPath === '/api/model-params') {
+  if (req.method === "POST" && reqPath === "/api/model-params") {
     if (!requireAdmin(req, res)) return;
     try {
-      const body = JSON.parse((await readBody(req)).toString() || '{}');
-      const forModel = typeof body._for_model === 'string' && body._for_model.trim()
-        ? body._for_model.trim()
-        : CFG.local.model;
+      const body = JSON.parse((await readBody(req)).toString() || "{}");
+      const forModel =
+        typeof body._for_model === "string" && body._for_model.trim()
+          ? body._for_model.trim()
+          : CFG.local.model;
       const { _for_model, ...rest } = body;
       modelParams = sparseGlobalFromFullState(rest, forModel);
       saveParams();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
-    } catch { res.writeHead(400).end('{}'); }
+    } catch {
+      res.writeHead(400).end("{}");
+    }
     return;
   }
 
-  if (req.method === 'POST' && reqPath === '/api/model-params-per-model') {
+  if (req.method === "POST" && reqPath === "/api/model-params-per-model") {
     if (!requireAdmin(req, res)) return;
     try {
       const body = JSON.parse((await readBody(req)).toString());
       const model = body.model;
-      if (!model || typeof model !== 'string') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'model required' }));
+      if (!model || typeof model !== "string") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "model required" }));
         return;
       }
       const overrides = body.overrides;
-      if (overrides !== undefined && overrides !== null && (typeof overrides !== 'object' || Array.isArray(overrides))) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'overrides must be an object' }));
+      if (
+        overrides !== undefined &&
+        overrides !== null &&
+        (typeof overrides !== "object" || Array.isArray(overrides))
+      ) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ ok: false, error: "overrides must be an object" }),
+        );
         return;
       }
       const k = normModelKey(model);
-      if (!overrides || typeof overrides !== 'object' || Object.keys(overrides).length === 0) {
+      if (
+        !overrides ||
+        typeof overrides !== "object" ||
+        Object.keys(overrides).length === 0
+      ) {
         delete perModelParams[k];
       } else {
         const clean = {};
         for (const key of Object.keys(PARAM_DEFAULTS)) {
           if (Object.prototype.hasOwnProperty.call(overrides, key)) {
             const v = overrides[key];
-            if (typeof v === 'number' && Number.isFinite(v)) clean[key] = v;
+            if (typeof v === "number" && Number.isFinite(v)) clean[key] = v;
           }
         }
         perModelParams[k] = clean;
       }
       savePerModelParams();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false }));
     }
     return;
   }
 
-  if (req.method === 'GET' && reqPath === '/api/router/model-params-raw') {
-    let which = 'global';
-    const q = req.url.indexOf('?');
+  if (req.method === "GET" && reqPath === "/api/router/model-params-raw") {
+    let which = "global";
+    const q = req.url.indexOf("?");
     if (q !== -1) {
       const sp = new URLSearchParams(req.url.slice(q + 1));
-      if (sp.get('which') === 'per-model') which = 'per-model';
+      if (sp.get("which") === "per-model") which = "per-model";
     }
-    const pathRel = which === 'per-model' ? '.claude/model-params-per-model.json' : '.claude/model-params.json';
+    const pathRel =
+      which === "per-model"
+        ? ".claude/model-params-per-model.json"
+        : ".claude/model-params.json";
     const content = readModelParamsFileRaw(which);
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ which, path: pathRel, content }));
     return;
   }
 
-  if (req.method === 'POST' && reqPath === '/api/router/model-params-raw') {
+  if (req.method === "POST" && reqPath === "/api/router/model-params-raw") {
     if (!requireAdmin(req, res)) return;
     try {
-      const body = JSON.parse((await readBody(req)).toString() || '{}');
-      const which = body.which === 'per-model' ? 'per-model' : 'global';
-      if (typeof body.content !== 'string') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'content must be a string' }));
+      const body = JSON.parse((await readBody(req)).toString() || "{}");
+      const which = body.which === "per-model" ? "per-model" : "global";
+      if (typeof body.content !== "string") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ ok: false, error: "content must be a string" }),
+        );
         return;
       }
       const parsed = JSON.parse(body.content);
-      if (which === 'global') {
+      if (which === "global") {
         modelParams = cleanGlobalParamsFromJson(parsed);
         saveParams();
       } else {
         perModelParams = cleanPerModelFileFromJson(parsed);
         savePerModelParams();
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
     } catch (e) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: e && e.message ? String(e.message) : 'invalid json or save failed' }));
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error:
+            e && e.message ? String(e.message) : "invalid json or save failed",
+        }),
+      );
     }
     return;
   }
 
   // Ollama service control (Windows)
-  if (req.method === 'POST' && reqPath.startsWith('/api/service/')) {
+  if (req.method === "POST" && reqPath.startsWith("/api/service/")) {
     if (!requireAdmin(req, res)) return;
-    const action = reqPath.split('/').pop();
+    const action = reqPath.split("/").pop();
     const cmds = {
-      start:   'powershell -Command "Start-Process ollama -ArgumentList serve -WindowStyle Hidden"',
-      stop:    'taskkill /F /IM ollama.exe /T',
-      restart: 'taskkill /F /IM ollama.exe /T & timeout /t 2 /nobreak >nul & powershell -Command "Start-Process ollama -ArgumentList serve -WindowStyle Hidden"',
+      start:
+        'powershell -Command "Start-Process ollama -ArgumentList serve -WindowStyle Hidden"',
+      stop: "taskkill /F /IM ollama.exe /T",
+      restart:
+        'taskkill /F /IM ollama.exe /T & timeout /t 2 /nobreak >nul & powershell -Command "Start-Process ollama -ArgumentList serve -WindowStyle Hidden"',
     };
-    if (!cmds[action]) { res.writeHead(400).end('{}'); return; }
+    if (!cmds[action]) {
+      res.writeHead(400).end("{}");
+      return;
+    }
     ollamaVersionCache = null; // reset so version re-fetches after restart
     exec(cmds[action], { timeout: 10000 }, (err) => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: !err, error: err?.message }));
     });
     return;
   }
 
-  if (reqPath.includes('/models')) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+  if (reqPath.includes("/models")) {
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ data: [] }));
     return;
   }
 
-  if (!reqPath.includes('/messages')) { res.writeHead(404).end('{}'); return; }
-  if (req.method !== 'POST') { res.writeHead(405).end(); return; }
+  if (!reqPath.includes("/messages")) {
+    res.writeHead(404).end("{}");
+    return;
+  }
+  if (req.method !== "POST") {
+    res.writeHead(405).end();
+    return;
+  }
 
   let rawBody, body;
-  try { rawBody = await readBody(req); body = JSON.parse(rawBody.toString()); }
-  catch { res.writeHead(400).end(JSON.stringify({ error: 'invalid json' })); return; }
+  try {
+    rawBody = await readBody(req);
+    body = JSON.parse(rawBody.toString());
+  } catch {
+    res.writeHead(400).end(JSON.stringify({ error: "invalid json" }));
+    return;
+  }
 
   metrics.bumpRequest();
   const mode = normalizeRoutingMode(CFG.routing.mode);
+  const cloudQuota = getCloudQuotaState();
   let routeResult;
-  if (mode === 'cloud') {
-    routeResult = { dest: 'cloud', reason: 'routing mode: Claude only' };
-  } else if (mode === 'local') {
-    routeResult = { dest: 'local', reason: 'routing mode: Ollama only' };
+  if (cloudQuota.exceeded && mode !== "local") {
+    routeResult = {
+      dest: "local",
+      reason: `cloud quota exceeded${cloudQuota.message ? " · " + cloudQuota.message : ""}`,
+    };
+  } else if (mode === "cloud") {
+    routeResult = { dest: "cloud", reason: "routing mode: Claude only" };
+  } else if (mode === "local") {
+    routeResult = { dest: "local", reason: "routing mode: Ollama only" };
   } else {
     routeResult = analyzeMessages(body, CFG.routing);
   }
-  if (routeResult.dest === 'cloud') {
-    routeTo('cloud', routeResult.reason);
+  if (routeResult.dest === "cloud") {
+    routeTo("cloud", routeResult.reason, false, { cloud_model: body.model });
     proxyCloud(req, rawBody, body, res);
   } else {
     proxyLocal(req, body, res, rawBody, routeResult);
@@ -3859,24 +4873,33 @@ const server = http.createServer(async (req, res) => {
 
 async function ensureAutoDefaultModelsFromOllama() {
   try {
-    if (process.env.ROUTER_SKIP_AUTO_DEFAULT_MODELS === '1' || /^true$/i.test(String(process.env.ROUTER_SKIP_AUTO_DEFAULT_MODELS || ''))) {
+    if (
+      process.env.ROUTER_SKIP_AUTO_DEFAULT_MODELS === "1" ||
+      /^true$/i.test(String(process.env.ROUTER_SKIP_AUTO_DEFAULT_MODELS || ""))
+    ) {
       return;
     }
     const needModel = localModelUnsetInConfigFile(routerDir);
     const needFast = localFastUnsetInConfigFile(routerDir);
     if (!needModel && !needFast) return;
 
-    const tagsBody = await ollamaGet('/api/tags');
+    const tagsBody = await ollamaGet("/api/tags");
     const models = normalizeOllamaTagList(tagsBody);
     if (!models.length) {
       if (needModel) {
-        console.warn('[hybrid-config] auto-default skipped: no Ollama tags (start Ollama or run ollama pull)');
+        console.warn(
+          "[hybrid-config] auto-default skipped: no Ollama tags (start Ollama or run ollama pull)",
+        );
       }
       return;
     }
 
-    const fixedPrimary = needModel ? null : String(CFG.local.model || '').trim();
-    const { primary, fast } = pickAutoDefaultModels(models, { fixedPrimary: fixedPrimary || null });
+    const fixedPrimary = needModel
+      ? null
+      : String(CFG.local.model || "").trim();
+    const { primary, fast } = pickAutoDefaultModels(models, {
+      fixedPrimary: fixedPrimary || null,
+    });
 
     if (needModel && primary) {
       saveLocalModel(routerDir, primary);
@@ -3885,7 +4908,7 @@ async function ensureAutoDefaultModelsFromOllama() {
     }
 
     if (needFast && fast) {
-      const p = String(CFG.local.model || '').trim();
+      const p = String(CFG.local.model || "").trim();
       if (p && fast.toLowerCase() !== p.toLowerCase()) {
         saveLocalRoutingSettings(routerDir, { fast_model: fast });
         CFG.local.fast_model = fast;
@@ -3894,22 +4917,38 @@ async function ensureAutoDefaultModelsFromOllama() {
     }
     normalizeLocalCfg();
   } catch (e) {
-    console.warn('[hybrid-config] auto-default models:', e && e.message ? e.message : e);
+    console.warn(
+      "[hybrid-config] auto-default models:",
+      e && e.message ? e.message : e,
+    );
   }
 }
 
 async function startListening() {
   await ensureAutoDefaultModelsFromOllama();
   server.listen(CFG.port, CFG.listenHost, () => {
-    console.log('');
-    console.log('  Claude Hybrid Router');
-    console.log('  -----------------------------------------');
+    console.log("");
+    console.log("  ClaudeLlama Router");
+    console.log("  -----------------------------------------");
     console.log(`  Dashboard  -> http://${CFG.listenHost}:${CFG.port}`);
-    console.log(`  Bind       -> ${CFG.listenHost}:${CFG.port}  (ROUTER_HOST=0.0.0.0 for LAN)`);
-    console.log(`  Local      -> http://${CFG.local.host}:${CFG.local.port}  (Gemma 4)`);
-    console.log(`  Cloud      -> https://${CFG.cloud.host}  (Claude Sonnet)`);
-    if (getAdminToken()) console.log('  Admin      -> ROUTER_ADMIN_TOKEN set (mutating /api/* require header)');
-    console.log('');
+    console.log(
+      `  Bind       -> ${CFG.listenHost}:${CFG.port}  (ROUTER_HOST=0.0.0.0 for LAN)`,
+    );
+    console.log(
+      `  Local      -> http://${CFG.local.host}:${CFG.local.port}  (Gemma 4)`,
+    );
+    console.log(
+      `  Cloud      -> ${CFG.cloud.protocol}://${CFG.cloud.host}:${CFG.cloud.port}  (model from request)`,
+    );
+    if (getAdminToken())
+      console.log(
+        "  Admin      -> ROUTER_ADMIN_TOKEN set (mutating /api/* require header)",
+      );
+    const idleMin = getIdleUnloadMinutes();
+    if (idleMin)
+      console.log(`  Idle       -> auto-unload after ${idleMin} min`);
+    console.log("");
+    startIdleUnloadTimer();
   });
 }
 
