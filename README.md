@@ -26,13 +26,9 @@ This section is the **contract** for how the kit is meant to work. Everything el
 
 **Autostart (`setup.ps1 -Autostart`, Startup shortcut):** also runs **`merge-env`** before spawning the background router so the same rules apply after login.
 
-### 3. Supported clients (non-negotiable)
+### 3. Supported clients
 
-| Client                                                        | Uses this router?                                                                                                    |
-| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **Claude Code** (`claude` CLI)                                | **Yes** — if **`ANTHROPIC_BASE_URL`** is set (see layer 1).                                                          |
-| **Cursor / VS Code** + Claude Code                            | **Yes** — same; use **`merge-env`** so IDE terminals see the URL.                                                    |
-| **Claude desktop Windows/Mac app** (standalone Anthropic app) | **No** — does **not** use **`ANTHROPIC_BASE_URL`** for normal chat, so this router cannot see or route that traffic. |
+This router works with any client that honors **`ANTHROPIC_BASE_URL`**: **Claude Code** (`claude` CLI), **Cursor**, and **VS Code** with Claude Code. Run **`npm run merge-env`** once so the URL is visible in IDE terminals.
 
 ---
 
@@ -116,6 +112,25 @@ Restart the IDE **fully** after setup or merge so the editor picks up **`setting
 For a stronger end-to-end check, run **`npm run diagnose:strict`**. It sends a live probe to **`/v1/messages`** and requires a new route entry in **`/api/logs`** to pass.
 
 **Lifecycle + hybrid vs bypass:** See **[Core behavior (read this first)](#core-behavior-read-this-first)** §§1–2. **`ROUTER_REMOVE_CLAUDE_API_KEY=1 npm run merge-env`** drops **`ANTHROPIC_API_KEY`** from `settings.json` only.
+
+### Automatic recovery (watchdog)
+
+When you run **`setup.ps1 -Autostart`**, a background health watchdog is installed as a **Windows scheduled task**. The watchdog:
+
+- Polls the router every **30 seconds** via `GET /api/health`
+- If the router crashes, **automatically restarts it** (most crashes are recovered within ~1 minute)
+- If the router stays down after **3+ restart attempts**, it **silently reverts** `ANTHROPIC_BASE_URL` from all sources so **Claude Code falls back to Anthropic cloud** (zero downtime, zero user intervention)
+- Logs all events to **`~/.claude/watchdog.log`** — check this file to see what the watchdog did
+
+**You don't have to do anything.** The watchdog runs silently in the background at every login. If your router crashes mid-session, Claude Code will keep working (either via the auto-restarted local router or via cloud fallback).
+
+To manually check watchdog status:
+
+```powershell
+Get-ScheduledTask -TaskName "Claude Hybrid Watchdog"      # task status
+Get-Content (Join-Path $env:USERPROFILE '.claude\watchdog.log')  # view logs
+Start-ScheduledTask -TaskName "Claude Hybrid Watchdog"    # force immediate run (debugging)
+```
 
 ---
 
@@ -268,9 +283,9 @@ Additional behavior worth knowing:
 | `GET/POST /api/router/local-routing-config` | Read/write `local.models`, `smart_routing`, and `fast_model`                                          |
 | `GET/POST /api/router/routing-mode`         | Read or change `routing.mode`                                                                         |
 | `POST /api/local-model`                     | Set `local.model`                                                                                     |
-| `GET/POST /api/model-params`                | Global generation defaults in `.claude/model-params.json`                                             |
+| `GET/POST /api/model-params`                | Global generation defaults in `.claude/model-params.json` (repo-local; not `~/.claude/`)             |
 | `GET /api/model-params-full`                | Built-in vs global vs per-model vs effective view                                                     |
-| `POST /api/model-params-per-model`          | Per-model overrides                                                                                   |
+| `POST /api/model-params-per-model`          | Per-model overrides (`.claude/model-params-per-model.json`, repo-local)                              |
 | `POST /api/router/model/start`              | Load default model into VRAM (API/automation; no dashboard **Start** button — Ollama loads on demand) |
 | `POST /api/router/model/stop`               | Unload the default Ollama model                                                                       |
 | `POST /api/router/model/restart`            | Restart the default Ollama model                                                                      |
@@ -337,9 +352,9 @@ ollama ps
 nvidia-smi
 ```
 
-**Only cloud / router log never updates when I chat**
+**Router log never updates when I chat**
 
-You are probably using the **Claude desktop Windows/Mac app**, which does not use **`ANTHROPIC_BASE_URL`**. Chats there never hit this router. Use **`claude`** in a **new** PowerShell or CMD window (after **`npm run merge-env`**) or Claude Code inside **Cursor / VS Code**, then check the dashboard footer log.
+Run **`npm run diagnose`** to confirm `ANTHROPIC_BASE_URL` is set and the router is listening. If the env is correct but the log is still empty, open a **new** terminal after `merge-env` so the variable is visible to the shell.
 
 **Claude “frozen” / no reply**
 

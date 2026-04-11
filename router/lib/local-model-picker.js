@@ -114,10 +114,28 @@ function analyzeLocalTask(body) {
     'security audit', 'system design', 'deep reason', 'race condition', 'design pattern',
     'from scratch', 'data model', 'api design',
   ];
+  const hasHeavyKeyword = heavyKeywords.some((k) => t.includes(k));
+
+  /** Tokens in the last user message only — separate from the full-transcript estTokens. */
+  const lastUserTokens = Math.ceil(text.length / 4);
+
+  /**
+   * Short follow-up in a long session: the user's actual message is brief, carries little
+   * new tool context, and has no heavy-intent signals. Keeps the fast model eligible even
+   * when the accumulated transcript is large — prevents always picking the big model for
+   * trivial follow-ups like “ok fix that” or “add a comment” mid-session.
+   */
+  const isQuickFollowUp =
+    lastUserTokens < 120 &&
+    toolResultsThisTurn <= 1 &&
+    !hasHeavyKeyword &&
+    !needsVision;
+
   const prefersHeavy =
-    estTokens > 2200 ||
-    heavyKeywords.some((k) => t.includes(k)) ||
-    toolResultsThisTurn >= 5;
+    !isQuickFollowUp &&
+    (estTokens > 3000 ||
+    hasHeavyKeyword ||
+    toolResultsThisTurn >= 5);
 
   /** Distinct from “heavy” coding context: math, proofs, explicit reasoning (can be short prompts). */
   const reasoningKeywords = [
@@ -149,6 +167,7 @@ function analyzeLocalTask(body) {
     prefersHeavy,
     prefersReasoning: !!prefersReasoning && !prefersSpeed,
     prefersSpeed,
+    isQuickFollowUp,
   };
 }
 
@@ -202,6 +221,7 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
   const prefersHeavy = !!task.prefersHeavy;
   const prefersSpeed = !!task.prefersSpeed;
   const prefersReasoning = !!task.prefersReasoning;
+  const isQuickFollowUp = !!task.isQuickFollowUp;
 
   const viable = profiles.filter((p) => {
     if (p.context_max != null && Number.isFinite(p.context_max) && p.context_max < minCtx) return false;
@@ -249,7 +269,7 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
       if (toolsInSchema && toolCap && !activeToolPayload && pb <= 9) s += 4;
     }
 
-    if (prefersSpeed && !prefersHeavy && fastNorm && norm(p.name) === fastNorm) {
+    if ((prefersSpeed || isQuickFollowUp) && !prefersHeavy && fastNorm && norm(p.name) === fastNorm) {
       s += 24;
     }
 
@@ -275,7 +295,8 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
 
   let reason = prefersHeavy ? 'heavier task → larger / capable model' : 'lighter task → smaller / fast model';
   if (prefersSpeed) reason += ' · speed-priority prompt';
-  if (fastNorm && prefersSpeed && norm(winner.name) === fastNorm) reason += ' · fast_model';
+  if (isQuickFollowUp) reason += ' · quick follow-up';
+  if (fastNorm && (prefersSpeed || isQuickFollowUp) && norm(winner.name) === fastNorm) reason += ' · fast_model';
   if (needsVision) reason += ' · vision';
   if (toolsInSchema) reason += ' · tools in schema';
   if (prefersReasoning) reason += ' · reasoning-oriented prompt';

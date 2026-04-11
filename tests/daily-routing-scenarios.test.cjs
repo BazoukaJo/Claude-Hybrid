@@ -186,7 +186,7 @@ test("daily: huge pasted transcript escalates to cloud (quality / context limit)
 test("daily: routing config matches shipped hybrid.config.example.json defaults", () => {
   assert.strictEqual(example.routing.mode, "hybrid");
   assert.strictEqual(ROUTING.tokenThreshold, 5000);
-  assert.strictEqual(ROUTING.fileReadThreshold, 7);
+  assert.strictEqual(ROUTING.fileReadThreshold, 10);
   assert.ok(ROUTING.keywords.includes("system design"));
   assert.ok(ROUTING.keywords.includes("security audit"));
 });

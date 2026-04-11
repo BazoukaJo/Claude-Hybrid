@@ -32,6 +32,7 @@ const {
   saveRoutingMode,
   localModelUnsetInConfigFile,
   localFastUnsetInConfigFile,
+  configPath,
 } = require("./lib/hybrid-config");
 const { pickAutoDefaultModels } = require("./lib/auto-default-models");
 const {
@@ -131,7 +132,7 @@ const CFG = {
   routing: {
     mode: "hybrid",
     tokenThreshold: 5000,
-    fileReadThreshold: 7,
+    fileReadThreshold: 10,
     keywords: [
       "architect",
       "security audit",
@@ -142,9 +143,6 @@ const CFG = {
       "system design",
       "data model",
       "api design",
-      "from scratch",
-      "complex bug",
-      "multi-file",
       "deep reason",
     ].map((k) => String(k).toLowerCase()),
   },
@@ -169,11 +167,7 @@ function normalizeDisplayCfg() {
   CFG.display.time_zone =
     normalizeTimeZone(CFG.display.time_zone) || localResolvedTimeZone();
 }
-loadAndApply(CFG, routerDir);
-normalizeLocalCfg();
-normalizeRoutingCfg();
-normalizeDisplayCfg();
-watchConfig(routerDir, () => {
+function onConfigReload() {
   loadAndApply(CFG, routerDir);
   normalizeLocalCfg();
   normalizeRoutingCfg();
@@ -182,7 +176,12 @@ watchConfig(routerDir, () => {
     `[hybrid-config] reloaded listen=${CFG.listenHost} model=${CFG.local.model} mode=${CFG.routing.mode} fast=${CFG.local.fast_model || "(none)"} pool=${CFG.local.models.length || "all-tags"} smart=${CFG.local.smart_routing} thresholds=${CFG.routing.tokenThreshold}/${CFG.routing.fileReadThreshold} tz=${CFG.display.time_zone || "local"}`,
   );
   startIdleUnloadTimer();
-});
+}
+loadAndApply(CFG, routerDir);
+normalizeLocalCfg();
+normalizeRoutingCfg();
+normalizeDisplayCfg();
+watchConfig(routerDir, onConfigReload);
 
 // ─── Model parameters ─────────────────────────────────────────────────────────
 const PARAM_DEFAULTS = {
@@ -1872,11 +1871,7 @@ h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;le
 }
 .dash-callout strong{color:var(--text)}
 .dash-callout .inline-code,.params-sub .inline-code{font-family:ui-monospace,Consolas,monospace;font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
-.dash-callout--client{
-  background:color-mix(in srgb,var(--amber) 10%,var(--tile-bg));
-  border-color:color-mix(in srgb,var(--amber) 32%,var(--border));
-}
-html.light .dash-callout--client{background:rgba(251,191,36,.14);border-color:rgba(217,119,6,.28)}
+.dash-callout-sub{font-size:11px;opacity:.6;display:block;margin-top:5px}
 .dash-supporter-footer{
   margin:0;padding:12px 16px;border:1px solid var(--tile-border);background:color-mix(in srgb,var(--tile-bg) 92%,transparent);border-radius:var(--dash-card-radius);
   display:flex;justify-content:center;text-align:center;
@@ -2384,9 +2379,10 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
     Smart routing uses your Ollama pool by default; very large prompts, heavy tool output this turn, or routing keywords go to Claude. <strong>Speed assist model</strong> prefers a smaller tag for brief prompts, and these settings save automatically.
   </div>
 
-  <div class="dash-callout dash-callout--client" role="note" aria-label="Which apps use the router">
-    <strong>Claude Code CLI / IDE works. Claude desktop Windows/Mac app does not.</strong>
-    Run <span class="inline-code">claude</span> after <span class="inline-code">npm run merge-env</span>, or use Cursor / VS Code with Claude Code. The standalone Claude desktop app bypasses <span class="inline-code">ANTHROPIC_BASE_URL</span> and goes straight to Anthropic, so this router cannot see or route that traffic. Watch the footer for <strong>LOCAL</strong> / <strong>CLOUD</strong>.
+  <div class="dash-callout" role="note" aria-label="Supported clients">
+    <strong>Claude Code CLI, desktop app, Cursor, and VS Code all route through here.</strong>
+    Run <span class="inline-code">npm run merge-env</span> once, then open any of those — no other configuration needed. Watch the footer for <strong>LOCAL</strong> / <strong>CLOUD</strong> to confirm routing is active.
+    <span class="dash-callout-sub">The separate claude.ai chat app bypasses <span class="inline-code">ANTHROPIC_BASE_URL</span> and cannot be routed through this proxy.</span>
   </div>
 
   <section class="dash-card dash-card--models-runtime" aria-labelledby="dash-models-h">
@@ -5071,7 +5067,7 @@ const server = http.createServer(async (req, res) => {
   } else if (mode === "local") {
     routeResult = { dest: "local", reason: "routing mode: Ollama only" };
   } else {
-    routeResult = analyzeMessages(body, CFG.routing);
+    routeResult = analyzeMessages(body, { ...CFG.routing, effectiveNumCtx: effectiveParamsFor(CFG.local.model).num_ctx });
   }
   if (routeResult.dest === "cloud") {
     routeTo("cloud", routeResult.reason, false, { cloud_model: body.model });
@@ -5135,7 +5131,13 @@ async function ensureAutoDefaultModelsFromOllama() {
 }
 
 async function startListening() {
+  const cfgExistedBefore = fs.existsSync(configPath(routerDir));
   await ensureAutoDefaultModelsFromOllama();
+  // If auto-default just created hybrid.config.json, register the file watcher now
+  // (watchConfig at startup silently skipped because the file didn't exist yet).
+  if (!cfgExistedBefore && fs.existsSync(configPath(routerDir))) {
+    watchConfig(routerDir, onConfigReload);
+  }
   server.listen(CFG.port, CFG.listenHost, () => {
     console.log("");
     console.log("  ClaudeLlama Router");
@@ -5145,7 +5147,7 @@ async function startListening() {
       `  Bind       -> ${CFG.listenHost}:${CFG.port}  (ROUTER_HOST=0.0.0.0 for LAN)`,
     );
     console.log(
-      `  Local      -> http://${CFG.local.host}:${CFG.local.port}  (Gemma 4)`,
+      `  Local      -> http://${CFG.local.host}:${CFG.local.port}  (${CFG.local.model || "no model set"})`,
     );
     console.log(
       `  Cloud      -> ${CFG.cloud.protocol}://${CFG.cloud.host}:${CFG.cloud.port}  (model from request)`,

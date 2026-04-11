@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 if "%ROUTER_PORT%"=="" set "ROUTER_PORT=8082"
 
-call "%~dp0stop_app.bat"
+call "%~dp0stop_app.bat" keepenv
 set "STOP_EC=!ERRORLEVEL!"
 call :wait_port_free
 if errorlevel 1 (

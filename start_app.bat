@@ -24,6 +24,18 @@ for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr "LISTENING" ^| findstr
 if defined PORT_PID (
   set "PORT_IMG="
   for /f "tokens=1 delims=," %%I in ('tasklist /FI "PID eq %PORT_PID%" /FO CSV /NH 2^>nul') do set "PORT_IMG=%%~I"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; try { $r = Invoke-RestMethod -Uri 'http://127.0.0.1:%ROUTER_PORT%/api/health' -TimeoutSec 2; if ($r.status -eq 'healthy') { exit 0 } } catch {}; exit 1" >nul 2>&1
+  if not errorlevel 1 (
+    echo Claude Hybrid router is already listening on port %ROUTER_PORT% ^(PID %PORT_PID%^).
+    echo Syncing hybrid env ^(merge-claude-hybrid-env^)...
+    node "%~dp0scripts\merge-claude-hybrid-env.js"
+    if errorlevel 1 (
+      echo ERROR: merge-claude-hybrid-env.js failed while router is already running.
+      echo Run npm run merge-env manually, then retry.
+      exit /b 1
+    )
+    exit /b 0
+  )
   if /I "%PORT_IMG%"=="node.exe" (
     echo Claude Hybrid router is already listening on port %ROUTER_PORT% ^(PID %PORT_PID%^).
     echo Syncing hybrid env ^(merge-claude-hybrid-env^)...

@@ -19,13 +19,11 @@ Guidance for Claude Code (and similar agents) working in this repository.
 
 ### Clients
 
-**Claude Code** / IDE-integrated flows: use the proxy when env is merged. **Claude desktop Windows/Mac app:** normal chat does **not** use **`ANTHROPIC_BASE_URL`** — this router cannot see or route that traffic; **not a router defect**.
+**Claude Code** (CLI and IDE extensions via Cursor / VS Code): use the proxy when env is merged — all model variants route correctly through the proxy. **Automatic recovery (watchdog):** When `-Autostart` is used, a background health watchdog monitors the router every 30 seconds. If the router crashes, the watchdog auto-restarts it (most recoveries within ~1 min). If restart fails after 3+ attempts, the watchdog silently reverts `ANTHROPIC_BASE_URL` so Claude Code falls back to Anthropic cloud — **zero downtime, zero user intervention**. Check **`~/.claude/watchdog.log`** for recovery events.
 
 ## What this project is
 
 A kit that routes **Claude Code** (and other Anthropic-API-compatible clients) between **local Ollama** and **Anthropic’s API** by task shape. After setup, the user runs **`claude`** in a terminal (or uses Cursor/VS Code with the same env); **`ANTHROPIC_BASE_URL`** points at this router when the lifecycle above is applied.
-
-The **Claude consumer desktop Windows/Mac app** is summarized under **Core behavior** → **Clients** above.
 
 ## Architecture
 
@@ -59,8 +57,8 @@ The proxy maps Anthropic message/tool format to OpenAI-style bodies for Ollama, 
 - **`router/hybrid.config.json`** — Optional; created from **`router/hybrid.config.example.json`** by `setup.ps1` if missing. Watcher reloads on save.
   Relevant keys: `listen.host`, **`display.time_zone`**, **`local.model`**, **`local.models`**, **`local.smart_routing`**, **`local.fast_model`**, **`routing.mode`**, **`routing.tokenThreshold`**, **`routing.fileReadThreshold`**, **`routing.keywords`**, and **`privacy.cloud_redaction.*`**. Dashboard updates write the local-routing and routing-mode keys automatically.
   If **`local.model`** or **`local.fast_model`** is **missing or empty**, the router **on startup** reads **`GET /api/tags`** and writes sensible defaults into the file (skip with **`ROUTER_SKIP_AUTO_DEFAULT_MODELS=1`**).
-- **`.claude/model-params.json`** — Global generation defaults (dashboard **Save** / **Generation settings**).
-- **`.claude/model-params-per-model.json`** — Per-model overrides.
+- **`.claude/model-params.json`** — Global generation defaults (dashboard **Save** / **Generation settings**). This is the **repo-local** `.claude/` directory, not `~/.claude/` (Claude Code's global config).
+- **`.claude/model-params-per-model.json`** — Per-model overrides. (Also repo-local.)
 
 Root **`.gitignore`** may exclude `router/hybrid.config.json` and some `.claude/*` JSON so local tuning is not committed.
 
@@ -121,7 +119,7 @@ ollama pull gemma4:e4b
 # or: .\setup.ps1 -RoutingOnly
 ```
 
-Restart the IDE after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, Cursor/VS Code **`terminal.integrated.env.*`** with **`ANTHROPIC_BASE_URL`** + **`ENABLE_TOOL_SEARCH`**, and aligns User **`ANTHROPIC_BASE_URL`** with **`setup.ps1`**), then **fully quit** the IDE and reopen. On Windows, merge may run **`scripts/notify-environment-windows.ps1`** so User env changes propagate without a full reboot (best-effort). The **Claude consumer desktop Windows/Mac app** is not the same integration path as Claude Code; prefer terminal **`claude`** or IDE extensions.
+Restart the IDE after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, Cursor/VS Code **`terminal.integrated.env.*`** with **`ANTHROPIC_BASE_URL`** + **`ENABLE_TOOL_SEARCH`**, and aligns User **`ANTHROPIC_BASE_URL`** with **`setup.ps1`**), then **fully quit** the IDE and reopen. On Windows, merge may run **`scripts/notify-environment-windows.ps1`** so User env changes propagate without a full reboot (best-effort).
 
 **Local deploy sanity:** **`npm start`** → dashboard **`http://127.0.0.1:8082/`**; **`npm run diagnose`** (Windows) checks port, listener, and settings. **`npm install`** is only required for **`npm test`** / Playwright, not for running the router.
 

@@ -302,7 +302,7 @@ function Ensure-RouterTimeZoneConfig {
         Write-Step "`[Config] Could not read router\hybrid.config.json to set time zone" Yellow
         return
     }
-    if ($null -eq $obj.display) {
+    if (-not (Get-Member -InputObject $obj -Name display -ErrorAction SilentlyContinue)) {
         Add-Member -InputObject $obj -MemberType NoteProperty -Name display -Value ([pscustomobject]@{})
     }
     $current = ''
@@ -312,7 +312,12 @@ function Ensure-RouterTimeZoneConfig {
         return
     }
     try {
-        $obj.display | Add-Member -MemberType NoteProperty -Name time_zone -Value $timeZone -Force
+        if (-not (Get-Member -InputObject $obj.display -Name time_zone -ErrorAction SilentlyContinue)) {
+            Add-Member -InputObject $obj.display -MemberType NoteProperty -Name time_zone -Value $timeZone
+        }
+        else {
+            $obj.display.time_zone = $timeZone
+        }
         $json = $obj | ConvertTo-Json -Depth 16
         [System.IO.File]::WriteAllText($target, $json + [Environment]::NewLine)
         Write-Step "`[Config] Router time zone set to $timeZone" Green
@@ -438,9 +443,27 @@ function Invoke-AutostartIfNeeded {
     Start-Sleep -Seconds 2
 }
 
+function Ensure-WatchdogTask {
+    $watchdogScript = "$ProjectDir\scripts\create-watchdog-task.ps1"
+    if (-not (Test-Path $watchdogScript)) {
+        Write-Step "`[Watchdog] Script not found: $watchdogScript" Yellow
+        return
+    }
+
+    Write-Step "`[Watchdog] Refreshing auto-restart watchdog task..." Yellow
+    try {
+        & $watchdogScript
+        Write-Step "`[Watchdog] Scheduled task is up to date" Green
+    }
+    catch {
+        Write-Step "`[Watchdog] Failed to register: $($_.Exception.Message)" Yellow
+    }
+}
+
 # --- Entry ---
 
 if ($Autostart) {
+    Ensure-WatchdogTask
     Invoke-AutostartDaemon
     exit 0
 }
@@ -480,6 +503,7 @@ Ensure-HybridRouterConfigFile
 Ensure-RouterTimeZoneConfig
 Ensure-StartupVbs
 Ensure-RootShortcut
+Ensure-WatchdogTask
 
 Invoke-AutostartIfNeeded
 

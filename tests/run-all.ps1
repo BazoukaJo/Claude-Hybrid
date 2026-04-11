@@ -17,6 +17,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "PASS: Node tests" -ForegroundColor Green
 
+Write-Host "== Watchdog integration (static analysis, no router needed) ==" -ForegroundColor Cyan
+& powershell -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\watchdog-integration.ps1"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "FAIL: Watchdog integration exited $LASTEXITCODE" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+Write-Host "PASS: Watchdog integration" -ForegroundColor Green
+
 if ($SkipLiveRouting) {
     Write-Host "SKIP: Live routing (--SkipLiveRouting)" -ForegroundColor Yellow
     exit 0

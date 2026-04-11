@@ -164,6 +164,15 @@ function analyzeMessages(body, routingCfg) {
     return { dest: "cloud", reason: `~${estTokens} tokens` };
   }
 
+  // Route to cloud when input fills most of the local context window so the model has
+  // enough room to produce a complete response. effectiveNumCtx is injected by server.js
+  // at runtime; absent in unit tests (no-op when 0 or missing).
+  const effectiveNumCtx = Number.isFinite(Number(routingCfg && routingCfg.effectiveNumCtx))
+    ? Number(routingCfg.effectiveNumCtx) : 0;
+  if (effectiveNumCtx > 0 && estTokens > effectiveNumCtx * 0.82) {
+    return { dest: "cloud", reason: `input fills ~${Math.round(estTokens / effectiveNumCtx * 100)}% of local context` };
+  }
+
   const lastUser = [...msgs].reverse().find((m) => m.role === "user");
   let toolResultsThisTurn = 0;
   let lastUserText = "";

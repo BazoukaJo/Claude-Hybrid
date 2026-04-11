@@ -14,7 +14,7 @@
   "routing": {
     "mode": "hybrid",
     "tokenThreshold": 5000,
-    "fileReadThreshold": 7,
+    "fileReadThreshold": 10,
     "keywords": [
       "architect",
       "security audit",
@@ -25,9 +25,6 @@
       "system design",
       "data model",
       "api design",
-      "from scratch",
-      "complex bug",
-      "multi-file",
       "deep reason"
     ]
   },
