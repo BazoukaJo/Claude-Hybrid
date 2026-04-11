@@ -14,8 +14,9 @@ Guidance for Claude Code (and similar agents) working in this repository.
 ### Lifecycle (keep env aligned with router state)
 
 - **Windows:** **`start_app.bat`** runs **`merge-env`** then starts **`node router/server.js`**. **`stop_app.bat`** stops the process and **by default** runs **`scripts/revert-hybrid-core.bat`** (clear kit proxy from **`~/.claude/settings.json`**, Cursor/VS Code **`terminal.integrated.env.*`**, User **`ANTHROPIC_BASE_URL`**). **`stop_app.bat keepenv`** stops without reverting.
-- **Manual `npm start`:** run **`npm run merge-env`** when enabling the proxy; **`npm run revert-env`** (and User env script if used) when returning to cloud-only.
-- **`setup.ps1 -Autostart`** / Startup shortcut: **`merge-env`** before background router spawn.
+- **Linux / macOS:** **`./start_app.sh`** and **`./stop_app.sh`** mirror the Windows bat scripts (`chmod +x *.sh` once). `stop_app.sh` calls `node scripts/revert-claude-hybrid-env.js` (reverts `~/.claude/settings.json` + IDE terminal env). **`./stop_app.sh keepenv`** stops without reverting.
+- **Manual `npm start`:** run **`npm run merge-env`** when enabling the proxy; **`npm run revert-env`** (and User env script if used on Windows) when returning to cloud-only.
+- **Autostart:** Windows — `setup.ps1 -Autostart` / Startup shortcut. macOS — launchd plist wrapping `scripts/watchdog-router.sh`. Linux — crontab `@reboot` or systemd user unit (see `scripts/watchdog-router.sh`).
 
 ### Clients
 
@@ -130,14 +131,27 @@ Restart the IDE after setup. If the router log stays empty, run **`npm run merge
 Restart the Node router after changing **`router/server.js`** or **`router/lib/*`** loaded at startup.
 
 ```powershell
+# Windows
 npm start
 # or: node router\server.js
-# Windows: start_app.bat (runs merge-env, then router); stop_app.bat (stops + reverts proxy in settings, IDE, User env; keepenv = stop only); restart_app.bat; install_startup_shortcut.bat → Startup folder .lnk
+# start_app.bat (runs merge-env, then router); stop_app.bat (stops + reverts proxy in settings, IDE, User env; keepenv = stop only); restart_app.bat; install_startup_shortcut.bat → Startup folder .lnk
 $env:ANTHROPIC_BASE_URL = ""   # force cloud for this session
 claude
 [System.Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
 npm run diagnose
 npm run merge-env
+```
+
+```bash
+# Linux / macOS
+chmod +x start_app.sh stop_app.sh restart_app.sh   # once
+./start_app.sh        # merge env + start router
+./stop_app.sh         # stop router + revert proxy
+./stop_app.sh keepenv # stop only
+./restart_app.sh      # stop keepenv + wait + start
+ANTHROPIC_BASE_URL="" claude   # force cloud for this session
+npm run merge-env
+# Watchdog: bash scripts/watchdog-router.sh &  (or via launchd / cron — see script header)
 ```
 
 The dashboard footer log hydrates from `/api/logs` and then follows `/events`, so an empty footer after refresh is a bug rather than expected behavior.

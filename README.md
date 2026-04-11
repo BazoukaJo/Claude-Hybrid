@@ -17,14 +17,18 @@ This section is the **contract** for how the kit is meant to work. Everything el
 
 **Goal:** When the router is **up**, Claude Code should use **local routing** (via the proxy). When the router is **down**, Claude Code should **not** keep pointing at a dead port — it should use **normal Anthropic cloud** (until you start the router again).
 
-| Action                                | What to use (Windows)                                                                                                                                                                                                                                                 |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Start router + apply proxy**        | **`start_app.bat`** — runs **`npm run merge-env`** then starts **`node router/server.js`**. Sets **`ANTHROPIC_BASE_URL`** in **`~/.claude/settings.json`**, **User** env, and **Cursor/VS Code** `terminal.integrated.env.*` where applicable.                        |
-| **Stop router + revert proxy**        | **`stop_app.bat`** — stops the listener, then runs **`scripts/revert-hybrid-core.bat`** (revert **`settings.json`**, IDE terminal env, User **`ANTHROPIC_BASE_URL`**). If a pre-router URL was saved, it is restored; otherwise proxy URL is removed (cloud default). |
-| **Stop router only, keep env**        | **`stop_app.bat keepenv`**                                                                                                                                                                                                                                            |
-| **Manual / Ctrl+C after `npm start`** | Run **`npm run merge-env`** when you start routing; run **`npm run revert-env`** and **`scripts\revert-hybrid-user-env.ps1`** (or **`stop_app.bat`**) when you want **cloud-only** again.                                                                             |
+| Action                                | Windows                                                                                                                                                                                                                                                               | Linux / macOS                                                                                                                        |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **Start router + apply proxy**        | **`start_app.bat`** — runs **`npm run merge-env`** then starts **`node router/server.js`**. Sets **`ANTHROPIC_BASE_URL`** in **`~/.claude/settings.json`**, **User** env, and **Cursor/VS Code** `terminal.integrated.env.*` where applicable.                        | **`./start_app.sh`** — same flow (merge env → start router in foreground). Mark executable once: `chmod +x start_app.sh stop_app.sh restart_app.sh` |
+| **Stop router + revert proxy**        | **`stop_app.bat`** — stops the listener, then runs **`scripts/revert-hybrid-core.bat`** (revert **`settings.json`**, IDE terminal env, User **`ANTHROPIC_BASE_URL`**). If a pre-router URL was saved, it is restored; otherwise proxy URL is removed (cloud default). | **`./stop_app.sh`** — kills the router process, then runs `node scripts/revert-claude-hybrid-env.js` (reverts `settings.json` + IDE terminal env). |
+| **Stop router only, keep env**        | **`stop_app.bat keepenv`**                                                                                                                                                                                                                                            | **`./stop_app.sh keepenv`**                                                                                                          |
+| **Restart**                           | **`restart_app.bat`**                                                                                                                                                                                                                                                 | **`./restart_app.sh`**                                                                                                               |
+| **Manual / Ctrl+C after `npm start`** | Run **`npm run merge-env`** when you start routing; run **`npm run revert-env`** and **`scripts\revert-hybrid-user-env.ps1`** (or **`stop_app.bat`**) when you want **cloud-only** again.                                                                             | Run **`npm run merge-env`** when you start routing; run **`npm run revert-env`** (or **`./stop_app.sh`**) when you want cloud-only.  |
 
-**Autostart (`setup.ps1 -Autostart`, Startup shortcut):** also runs **`merge-env`** before spawning the background router so the same rules apply after login.
+**Autostart:**
+- **Windows** — `setup.ps1 -Autostart` / Startup shortcut: runs **`merge-env`** before spawning the background router so the same rules apply after login. Watchdog: `scripts/watchdog-router.ps1`.
+- **macOS** — create a launchd plist pointing at `scripts/watchdog-router.sh` (see comments inside the file). The watchdog starts the router and monitors it every 30 s.
+- **Linux** — add `@reboot bash /path/to/Claude-Hybrid/scripts/watchdog-router.sh &` to crontab, or write a systemd user service (see `scripts/watchdog-router.sh` header comments).
 
 ### 3. Supported clients
 
@@ -173,9 +177,9 @@ On the **host**, point Claude at the proxy (**`http://127.0.0.1:8082`**) — run
 
 | Goal                        | Command                                                                                                                                                                                             |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Start router                | **Windows (recommended):** **`start_app.bat`** (merge env + start, minimized). Else **`npm start`** / **`node .\router\server.js`** — then **`npm run merge-env`** if the proxy URL is not set yet. |
-| Stop / restart (Windows)    | **`stop_app.bat`** (stops + clears proxy env by default; **`keepenv`** = stop only), **`restart_app.bat`** (`ROUTER_PORT`, default 8082)                                                            |
-| Login autostart (Windows)   | Run **`install_startup_shortcut.bat`** once (creates _ClaudeLlama Router.lnk_ in your Startup folder; **Win+R** → `shell:startup` to view or remove)                                                |
+| Start router                | **Windows:** **`start_app.bat`**. **Linux/macOS:** **`./start_app.sh`** (chmod +x first). **Any OS:** **`npm start`** / **`node router/server.js`** — then **`npm run merge-env`** if proxy URL is not set. |
+| Stop / restart              | **Windows:** **`stop_app.bat`** / **`restart_app.bat`**. **Linux/macOS:** **`./stop_app.sh`** / **`./restart_app.sh`** (`keepenv` arg to skip env revert on either platform).                              |
+| Login autostart             | **Windows:** **`install_startup_shortcut.bat`** (Startup folder .lnk). **macOS:** launchd plist → `scripts/watchdog-router.sh`. **Linux:** crontab `@reboot` or systemd user unit (see `scripts/watchdog-router.sh`). |
 | Open dashboard              | Browser: **`http://127.0.0.1:8082/`** (or `localhost`; use **`ROUTER_PORT`** if not 8082)                                                                                                           |
 | Run tests                   | `npm test` · full + UI screenshots: `npm run test:all`                                                                                                                                              |
 | Check IDE / Claude env      | **`npm run diagnose`** (Windows PowerShell: `ANTHROPIC_BASE_URL`, `ROUTER_PORT`, listener, `settings.json`, API key hint)                                                                           |
@@ -256,7 +260,7 @@ Recommended first pass:
 - Last user text contains a configured keyword
 
 **Otherwise local.**
-Complexity keywords default to things like `architect`, `security audit`, `multi-file`, and `deep reason`.
+Complexity keywords default to things like `architect`, `security audit`, `system design`, and `deep reason`.
 
 Additional behavior worth knowing:
 

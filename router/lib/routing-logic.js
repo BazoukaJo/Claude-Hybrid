@@ -10,7 +10,7 @@ const ROUTING_TOKEN_THRESHOLD_DEFAULT = 5000;
 /** Tool-result blocks in the *last user message* that trigger cloud. */
 const ROUTING_FILE_READ_THRESHOLD_MIN = 1;
 const ROUTING_FILE_READ_THRESHOLD_MAX = 256;
-const ROUTING_FILE_READ_THRESHOLD_DEFAULT = 7;
+const ROUTING_FILE_READ_THRESHOLD_DEFAULT = 10;
 
 function toIntRoutingField(value, defaultVal) {
   if (value == null || value === "") return defaultVal;

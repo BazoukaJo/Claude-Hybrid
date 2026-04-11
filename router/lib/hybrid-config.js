@@ -6,6 +6,9 @@ const { normalizeTimeZone } = require("./time-format");
 
 const CONFIG_BASENAME = "hybrid.config.json";
 
+/** Prevents double-registration when watchConfig is called more than once (e.g. after auto-default creates the file). */
+const _watchedPaths = new Set();
+
 /** Absolute path to JSON file; used by integration tests so mutating routes do not touch the repo config. */
 function configPath(dir) {
   const override = process.env.ROUTER_HYBRID_CONFIG;
@@ -206,8 +209,10 @@ function saveRoutingMode(routerDir, mode) {
 
 function watchConfig(routerDir, onReload) {
   const p = configPath(routerDir);
-  let t;
   if (!fs.existsSync(p)) return;
+  if (_watchedPaths.has(p)) return; // already watching; skip double-registration
+  _watchedPaths.add(p);
+  let t;
   try {
     fs.watch(p, () => {
       clearTimeout(t);
@@ -220,7 +225,7 @@ function watchConfig(routerDir, onReload) {
       }, 400);
     });
   } catch (_) {
-    /* ignore */
+    _watchedPaths.delete(p); // watch setup failed; allow retry next call
   }
 }
 

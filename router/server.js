@@ -17,6 +17,7 @@ const {
   listPsModels,
   psModelId,
   maxContextFromShow,
+  modelNamesMatch,
 } = require("./lib/model-utils");
 const {
   analyzeMessages,
@@ -5130,6 +5131,42 @@ async function ensureAutoDefaultModelsFromOllama() {
   }
 }
 
+/**
+ * Startup sanity check: warn (console + dashboard log) when CFG.local.model does not match
+ * anything in Ollama /api/tags. Hybrid mode falls back to cloud automatically; local-only
+ * mode would fail every request. Either way the user should know before the first turn.
+ */
+async function validateLocalModelAgainstOllama() {
+  const configured = String(CFG.local.model || "").trim();
+  if (!configured) return;
+  try {
+    const tagsBody = await ollamaGet("/api/tags");
+    const installed = normalizeOllamaTagList(tagsBody);
+    if (!installed.length) return; // Ollama has no models yet; skip
+    const found = installed.some((m) => modelNamesMatch(configured, m.name));
+    if (!found) {
+      const names = installed.map((m) => m.name).join(", ");
+      const hint =
+        normalizeRoutingMode(CFG.routing && CFG.routing.mode) === "local"
+          ? "Local-only mode is set — every request will fail until this is fixed."
+          : "Hybrid mode will fall back to cloud for local turns.";
+      const msg =
+        `local.model "${configured}" is not installed in Ollama` +
+        ` (installed: ${names || "none"}). ${hint}` +
+        ` Fix: ollama pull ${configured}  OR set a different model in hybrid.config.json.`;
+      console.warn(`[hybrid-config] WARNING: ${msg}`);
+      pushLog({
+        time: ts(),
+        dest: "local",
+        reason: `⚠ Model mismatch — ${msg}`,
+        fallback: true,
+      });
+    }
+  } catch {
+    // Ollama unreachable at startup — handled elsewhere; skip silently
+  }
+}
+
 async function startListening() {
   const cfgExistedBefore = fs.existsSync(configPath(routerDir));
   await ensureAutoDefaultModelsFromOllama();
@@ -5138,6 +5175,7 @@ async function startListening() {
   if (!cfgExistedBefore && fs.existsSync(configPath(routerDir))) {
     watchConfig(routerDir, onConfigReload);
   }
+  await validateLocalModelAgainstOllama();
   server.listen(CFG.port, CFG.listenHost, () => {
     console.log("");
     console.log("  ClaudeLlama Router");
