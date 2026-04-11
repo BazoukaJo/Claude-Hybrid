@@ -37,11 +37,11 @@ test('getEffectiveThresholds clamps file-read threshold', () => {
 test('getEffectiveThresholds defaults when missing or NaN', () => {
   assert.deepStrictEqual(getEffectiveThresholds({}), {
     tokenThreshold: 5000,
-    fileReadThreshold: 7,
+    fileReadThreshold: 10,
   });
   assert.deepStrictEqual(
     getEffectiveThresholds({ tokenThreshold: 'nope', fileReadThreshold: null }),
-    { tokenThreshold: 5000, fileReadThreshold: 7 },
+    { tokenThreshold: 5000, fileReadThreshold: 10 },
   );
 });
 

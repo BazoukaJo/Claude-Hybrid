@@ -1,5 +1,7 @@
 {
   "name": "claude-hybrid",
+  "version": "0.1.0",
+  "description": "Proxy router that routes Claude Code traffic between local Ollama models and Anthropic cloud by task shape — zero-config hybrid AI for developers",
   "private": true,
   "scripts": {
     "start": "node router/server.js",
