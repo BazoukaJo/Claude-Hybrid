@@ -2,10 +2,19 @@
 
 const ROUTING_MODES = ["hybrid", "cloud", "local"];
 
-/** Estimated-token gate for hybrid routing (~chars/4). Not too low or every turn hits cloud; not unbounded. */
+/**
+ * Estimated-token gate for hybrid routing (~chars/4).
+ *
+ * Why 32 000 by default:
+ *   Claude Code requests include a large system prompt (CLAUDE.md + env block),
+ *   git status, and several tool-result file reads.  A typical session turn is
+ *   60 000–120 000 characters, which estimates to 15 000–30 000 tokens.
+ *   The old 5 000 default sent every single turn to cloud.  32 000 lets routine
+ *   coding turns stay local while routing genuinely large context to cloud.
+ */
 const ROUTING_TOKEN_THRESHOLD_MIN = 1000;
 const ROUTING_TOKEN_THRESHOLD_MAX = 2_000_000;
-const ROUTING_TOKEN_THRESHOLD_DEFAULT = 5000;
+const ROUTING_TOKEN_THRESHOLD_DEFAULT = 32000;
 
 /** Tool-result blocks in the *last user message* that trigger cloud. */
 const ROUTING_FILE_READ_THRESHOLD_MIN = 1;
@@ -45,6 +54,13 @@ function sanitizeRoutingThresholds(routing) {
   routing.tokenThreshold = e.tokenThreshold;
   routing.fileReadThreshold = e.fileReadThreshold;
 }
+
+/**
+ * Keywords that use prefix/stem matching (no word-boundary requirement at end).
+ * "vulnerabilit" matches vulnerability / vulnerabilities / vulnerable.
+ * "threat model" matches threat model / threat modeling / threat models.
+ */
+const KEYWORD_PREFIX_STEMS = new Set(["vulnerabilit", "threat model"]);
 
 const CONCISE_LOCAL_HINTS = [
   "brief",
@@ -102,8 +118,9 @@ function keywordMatches(text, keyword) {
   if (!kw) return false;
   const hay = ` ${normalizeUserText(text)} `;
   if (hay.includes(` ${kw} `)) return true;
-  // Preserve the existing prefix-style behavior for intentionally stemmed keywords.
-  if (kw.endsWith(" optim")) return hay.includes(` ${kw}`);
+  // Prefix/stem matching: keyword is a deliberate word-stem; match any word that
+  // starts with it.  Applied to " optim" stems and entries in KEYWORD_PREFIX_STEMS.
+  if (KEYWORD_PREFIX_STEMS.has(kw) || kw.endsWith(" optim")) return hay.includes(` ${kw}`);
   return false;
 }
 
@@ -116,7 +133,10 @@ function genericKeywordNeedsCloud(
   const ctx = GENERIC_KEYWORD_CONTEXT[keyword];
   if (!ctx) return true;
   if (toolResultsThisTurn > 0) return true;
-  if (estTokens >= 900) return true;
+  // Only escalate based on conversation length when the session is substantial (≥2500 tokens).
+  // The previous threshold of 900 was too aggressive: a handful of code-snippet exchanges
+  // routinely exceeded it, causing generic "audit logging" requests to be misrouted to cloud.
+  if (estTokens >= 2500) return true;
   return ctx.some((hint) => text.includes(hint));
 }
 
@@ -141,6 +161,17 @@ function normalizeRoutingMode(value) {
  * Tool-result overload is judged on the *last user message* only: Claude Code sends the
  * full transcript each time; counting every historical tool_result made >7 hits trivial,
  * so nothing ever routed locally after a short session.
+ *
+ * Extended routing fields (all optional, set via hybrid.config.json):
+ *   routingCfg.alwaysLocalTerms      — string[] — force local before ALL other rules when
+ *                                       last user message contains any of these terms.
+ *                                       Useful for sensitive internal names that must never
+ *                                       reach cloud regardless of token count or keywords.
+ *   routingCfg.forceLocalIfPrivacyTerms — boolean — when true + privacyCustomTerms has
+ *                                       entries, force local if any privacy term appears in
+ *                                       the last user message (checked after hard thresholds,
+ *                                       before keyword escalation).
+ *   routingCfg.privacyCustomTerms    — string[] — terms list used by forceLocalIfPrivacyTerms.
  */
 function analyzeMessages(body, routingCfg) {
   const msgs = body.messages || [];
@@ -149,30 +180,7 @@ function analyzeMessages(body, routingCfg) {
   const keywords =
     (routingCfg && routingCfg.keywords) || [];
 
-  let chars = 0;
-  for (const m of msgs) {
-    const blocks = Array.isArray(m.content)
-      ? m.content
-      : [{ text: typeof m.content === "string" ? m.content : "" }];
-    for (const b of blocks) {
-      chars += (b.text || b.content || JSON.stringify(b)).length;
-    }
-  }
-
-  const estTokens = Math.ceil(chars / 4);
-  if (estTokens > tokenThreshold) {
-    return { dest: "cloud", reason: `~${estTokens} tokens` };
-  }
-
-  // Route to cloud when input fills most of the local context window so the model has
-  // enough room to produce a complete response. effectiveNumCtx is injected by server.js
-  // at runtime; absent in unit tests (no-op when 0 or missing).
-  const effectiveNumCtx = Number.isFinite(Number(routingCfg && routingCfg.effectiveNumCtx))
-    ? Number(routingCfg.effectiveNumCtx) : 0;
-  if (effectiveNumCtx > 0 && estTokens > effectiveNumCtx * 0.82) {
-    return { dest: "cloud", reason: `input fills ~${Math.round(estTokens / effectiveNumCtx * 100)}% of local context` };
-  }
-
+  // ── Extract last user message text early (needed for alwaysLocalTerms) ────
   const lastUser = [...msgs].reverse().find((m) => m.role === "user");
   let toolResultsThisTurn = 0;
   let lastUserText = "";
@@ -188,6 +196,52 @@ function analyzeMessages(body, routingCfg) {
       lastUserText = lastUserText.trim();
     }
   }
+
+  // ── 0. alwaysLocalTerms — absolute force-local before any escalation ─────
+  const alwaysLocalTerms = (routingCfg && routingCfg.alwaysLocalTerms) || [];
+  if (alwaysLocalTerms.length > 0) {
+    const normText = normalizeUserText(lastUserText);
+    for (const term of alwaysLocalTerms) {
+      const normTerm = normalizeUserText(term);
+      if (normTerm && normText.includes(normTerm)) {
+        return { dest: "local", reason: `always-local term "${term}"` };
+      }
+    }
+  }
+
+  let chars = 0;
+  for (const m of msgs) {
+    const blocks = Array.isArray(m.content)
+      ? m.content
+      : [{ text: typeof m.content === "string" ? m.content : "" }];
+    for (const b of blocks) {
+      chars += (b.text || b.content || JSON.stringify(b)).length;
+    }
+  }
+
+  // ── 1. Token threshold ────────────────────────────────────────────────────
+  const estTokens = Math.ceil(chars / 4);
+  if (estTokens > tokenThreshold) {
+    return { dest: "cloud", reason: `~${estTokens} tokens` };
+  }
+
+  // ── 2. Local context window saturation ───────────────────────────────────
+  // Route to cloud when input fills most of the local context window so the model has
+  // enough room to produce a complete response. effectiveNumCtx is injected by server.js
+  // at runtime; absent in unit tests (no-op when 0 or missing).
+  //
+  // Guard: only apply saturation routing when effectiveNumCtx > 8192.
+  // Values ≤ 8192 indicate either (a) the user never changed the default, or
+  // (b) a genuinely tiny model — in both cases the token-threshold check above
+  // already handles routing correctly, and firing saturation at ~3 400 tokens
+  // (82 % of 4 096) would send every typical Claude Code request to cloud.
+  const effectiveNumCtx = Number.isFinite(Number(routingCfg && routingCfg.effectiveNumCtx))
+    ? Number(routingCfg.effectiveNumCtx) : 0;
+  if (effectiveNumCtx > 8192 && estTokens > effectiveNumCtx * 0.82) {
+    return { dest: "cloud", reason: `input fills ~${Math.round(estTokens / effectiveNumCtx * 100)}% of local context` };
+  }
+
+  // ── 3. Tool-result flood ──────────────────────────────────────────────────
   if (toolResultsThisTurn > fileReadThreshold) {
     return {
       dest: "cloud",
@@ -197,6 +251,23 @@ function analyzeMessages(body, routingCfg) {
 
   if (lastUser) {
     const text = normalizeUserText(lastUserText);
+
+    // ── 4. forceLocalIfPrivacyTerms — privacy-aware routing ─────────────────
+    // Force local when the prompt contains sensitive custom terms, short-circuiting
+    // keyword escalation. Only active when below hard thresholds (cloud is a last
+    // resort for very large or tool-heavy requests even with sensitive terms).
+    const forceLocalIfPrivacy = !!(routingCfg && routingCfg.forceLocalIfPrivacyTerms);
+    const privacyTerms = (routingCfg && routingCfg.privacyCustomTerms) || [];
+    if (forceLocalIfPrivacy && privacyTerms.length > 0) {
+      for (const term of privacyTerms) {
+        const normTerm = normalizeUserText(term);
+        if (normTerm && text.includes(normTerm)) {
+          return { dest: "local", reason: `privacy term "${term}" kept local` };
+        }
+      }
+    }
+
+    // ── 5. Keyword escalation ─────────────────────────────────────────────
     const lastUserTokens = Math.ceil(lastUserText.length / 4);
     const wantsConciseLocal =
       toolResultsThisTurn === 0 &&

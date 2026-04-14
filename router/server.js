@@ -54,6 +54,16 @@ const {
   redactCloudRequestBody,
 } = require("./lib/privacy-redactor");
 const {
+  DEFAULT_PROJECT_OBFUSCATION,
+  createProjectObfuscator,
+  StreamDeobfuscator,
+} = require("./lib/project-obfuscator");
+const {
+  DEFAULT_ABORT_PHRASES,
+  checkNonStreamingContent,
+  createStreamGuard,
+} = require("./lib/cascade-guard");
+const {
   selectEnrichmentHead,
   mergeEnrichedModels,
 } = require("./lib/ollama-enrich-cap");
@@ -92,6 +102,8 @@ const CFG = {
     models: [],
     smart_routing: true,
     fast_model: "",
+    /** Abort local stream and retry cloud when model emits incapability phrase. */
+    cascadeQuality: true,
   },
   cloud: {
     protocol: normalizeCloudProtocol(process.env.ROUTER_CLOUD_PROTOCOL),
@@ -109,6 +121,7 @@ const CFG = {
   },
   privacy: {
     cloud_redaction: { ...DEFAULT_CLOUD_REDACTION },
+    project_obfuscation: { ...DEFAULT_PROJECT_OBFUSCATION },
   },
   paramsFile: path.join(__dirname, "..", ".claude", "model-params.json"),
   perModelFile: path.join(
@@ -146,6 +159,12 @@ const CFG = {
       "api design",
       "deep reason",
     ].map((k) => String(k).toLowerCase()),
+    /** Terms that force local routing before all other rules (e.g. internal codenames). */
+    alwaysLocalTerms: [],
+    /** When true + privacyCustomTerms, force local if any privacy term appears in the prompt. */
+    forceLocalIfPrivacyTerms: false,
+    /** Terms used by forceLocalIfPrivacyTerms to detect sensitive content. */
+    privacyCustomTerms: [],
   },
 };
 
@@ -189,7 +208,7 @@ const PARAM_DEFAULTS = {
   temperature: 0.8,
   top_p: 0.9,
   top_k: 40,
-  num_ctx: 4096,
+  num_ctx: 16384,  // raised from 4096 — gives Ollama 16k context by default
   seed: 0,
   num_predict: -1,
   repeat_penalty: 1.1,
@@ -1261,8 +1280,25 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
   };
   const cloudTransport = CFG.cloud.protocol === "http" ? http : https;
   const privacy = redactCloudRequestBody(body, CFG.privacy.cloud_redaction);
-  const cloudBody = privacy.changed ? privacy.body : body;
-  const cloudRawBody = privacy.changed
+  let cloudBody = privacy.changed ? privacy.body : body;
+
+  // ── Bidirectional project obfuscation ──────────────────────────────────────
+  // Scans the (possibly already privacy-redacted) body for project-specific
+  // file names, identifiers, and configured project_terms, then replaces them
+  // with neutral aliases before forwarding to Anthropic.  The same obfuscator
+  // instance is used to reverse the aliases in the cloud response so Claude
+  // Code tools (Read, Edit, Bash, Glob…) receive real file paths and names.
+  const projObf = createProjectObfuscator(
+    CFG.privacy.project_obfuscation,
+    cloudBody,
+  );
+  let bodyModified = privacy.changed;
+  if (projObf) {
+    const { body: obfBody, changed } = projObf.obfuscateBody(cloudBody);
+    if (changed) { cloudBody = obfBody; bodyModified = true; }
+  }
+
+  const cloudRawBody = bodyModified
     ? Buffer.from(JSON.stringify(cloudBody))
     : rawBody;
   if (fallback)
@@ -1327,6 +1363,15 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
       let sniffing = true;
       const sniffedChunks = [];
       let sniffedBytes = 0;
+      // Stream-level deobfuscator: restores project aliases in SSE chunks.
+      // Uses a tail-buffer so aliases split across chunk boundaries are handled.
+      const streamDeobf = projObf ? new StreamDeobfuscator(projObf) : null;
+      const writeChunk = streamDeobf
+        ? (chunk) => {
+            const out = streamDeobf.process(chunk);
+            if (out.length) res.write(out);
+          }
+        : (chunk) => res.write(chunk);
       const flushStream = () => {
         if (redirected || !sniffing) return;
         sniffing = false;
@@ -1335,13 +1380,13 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
         });
-        for (const chunk of sniffedChunks) res.write(chunk);
+        for (const chunk of sniffedChunks) writeChunk(chunk);
         sniffedChunks.length = 0;
       };
       upstream.on("data", (chunk) => {
         if (redirected) return;
         if (!sniffing) {
-          res.write(chunk);
+          writeChunk(chunk);
           return;
         }
         sniffedChunks.push(chunk);
@@ -1376,6 +1421,10 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
       upstream.on("end", () => {
         if (redirected) return;
         flushStream();
+        if (streamDeobf) {
+          const tail = streamDeobf.flush();
+          if (tail.length) res.write(tail);
+        }
         res.end();
       });
       upstream.on("error", () => {
@@ -1413,10 +1462,16 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
         return proxyLocal(incoming, body, res, rawBody, cloudLimitRoute);
       }
       if (upstream.statusCode < 400) clearCloudQuotaExceeded();
+      // Deobfuscate project aliases in the full response body
+      let finalBuf = bodyBuf;
+      if (projObf) {
+        const deobfText = projObf.deobfuscateString(bodyTxt);
+        if (deobfText !== bodyTxt) finalBuf = Buffer.from(deobfText, "utf8");
+      }
       res.writeHead(upstream.statusCode, {
         "Content-Type": "application/json",
       });
-      res.end(bodyBuf);
+      res.end(finalBuf);
     });
   });
   req.on("error", () => {
@@ -1498,17 +1553,51 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
           return;
         }
         if (streaming) {
-          res.writeHead(200, {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-          });
-          pipeLocalStream(upstream, res, anthropicModel);
+          const useCascade = CFG.local.cascadeQuality && ollamaUnreachableMayUseCloud();
+          if (useCascade) {
+            const guard = createStreamGuard(upstream, DEFAULT_ABORT_PHRASES);
+            guard.once("abort", ({ phrase }) => {
+              // Local model signalled it can't answer — transparent cloud retry.
+              // Record as a proper fallback so dashboard metrics reflect reality:
+              // cascade aborts are cloud requests, not local successes.
+              metrics.recordCascadeAbort(chosen);
+              routeTo("cloud", `cascade abort: "${phrase}"`, true, { cloud_model: body.model });
+              if (!res.headersSent) {
+                proxyCloud(incoming, rawBody, body, res, false);
+              }
+            });
+            guard.once("flushing", () => {
+              // Quality gate passed — write headers now and forward stream
+              res.writeHead(200, {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+              });
+              pipeLocalStream(guard, res, anthropicModel);
+            });
+          } else {
+            res.writeHead(200, {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+            });
+            pipeLocalStream(upstream, res, anthropicModel);
+          }
         } else {
           const chunks = [];
           upstream.on("data", (c) => chunks.push(c));
           upstream.on("end", () => {
             try {
               const oai = JSON.parse(Buffer.concat(chunks).toString());
+              // Cascade quality check for non-streaming responses
+              if (CFG.local.cascadeQuality && ollamaUnreachableMayUseCloud()) {
+                const responseText =
+                  oai.choices?.[0]?.message?.content || "";
+                const phrase = checkNonStreamingContent(responseText, DEFAULT_ABORT_PHRASES);
+                if (phrase) {
+                  metrics.recordCascadeAbort(chosen);
+                  routeTo("cloud", `cascade abort: "${phrase}"`, true, { cloud_model: body.model });
+                  return proxyCloud(incoming, rawBody, body, res, false);
+                }
+              }
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify(toAnthropic(oai, anthropicModel)));
             } catch {
@@ -1562,11 +1651,13 @@ function readBody(req) {
 }
 
 // ─── Dashboard HTML ───────────────────────────────────────────────────────────
-function paramSlider(key, label, desc, min, max, step, val) {
-  return `<div class="param-item" data-param="${key}"><div class="param-label"><span class="param-label-text">${label}</span><span class="param-default-pill built-in" id="pill-${key}">Default</span><span class="param-val" id="v-${key}">${val}</span></div><input type="range" id="p-${key}" min="${min}" max="${max}" step="${step}" value="${val}"><div class="param-desc">${desc}</div></div>`;
+function paramSlider(key, label, desc, min, max, step, val, tip = "") {
+  const tipAttr = tip ? ` data-tip="${tip.replace(/"/g, "&quot;")}"` : "";
+  return `<div class="param-item" data-param="${key}"><div class="param-label"><span class="param-label-text"${tipAttr}>${label}${tip ? '<i class="tip-icon">?</i>' : ""}</span><span class="param-default-pill built-in" id="pill-${key}">Default</span><span class="param-val" id="v-${key}">${val}</span></div><input type="range" id="p-${key}" min="${min}" max="${max}" step="${step}" value="${val}"><div class="param-desc">${desc}</div></div>`;
 }
-function paramNumber(key, label, desc, min, max, val) {
-  return `<div class="param-item" data-param="${key}"><div class="param-label"><span class="param-label-text">${label}</span><span class="param-default-pill built-in" id="pill-${key}">Default</span></div><input type="number" class="param-num" id="p-${key}" min="${min}" max="${max}" value="${val}"><div class="param-desc">${desc}</div></div>`;
+function paramNumber(key, label, desc, min, max, val, tip = "") {
+  const tipAttr = tip ? ` data-tip="${tip.replace(/"/g, "&quot;")}"` : "";
+  return `<div class="param-item" data-param="${key}"><div class="param-label"><span class="param-label-text"${tipAttr}>${label}${tip ? '<i class="tip-icon">?</i>' : ""}</span><span class="param-default-pill built-in" id="pill-${key}">Default</span></div><input type="number" class="param-num" id="p-${key}" min="${min}" max="${max}" value="${val}"><div class="param-desc">${desc}</div></div>`;
 }
 
 /** JSON.stringify output safe for embedding in an inline HTML script (avoids closing the script tag on U+003C in data). */
@@ -2131,6 +2222,50 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
 .fixed-log-footer.is-collapsed .fixed-log-resizer{display:none}
 .fixed-log-footer.is-collapsed .fixed-log-head{border-bottom:none}
 .fixed-log-footer.is-collapsed .fixed-log-output{display:none}
+
+/* ── Tooltip system ──────────────────────────────────────────────────────── */
+/* Usage: data-tip="text" on any element. Use data-tip-right / data-tip-left  */
+/* / data-tip-bottom modifiers for direction. .tip-icon = inline ? badge.     */
+[data-tip]{position:relative;cursor:default}
+[data-tip]:hover::after{
+  content:attr(data-tip);
+  position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);
+  background:rgba(8,8,8,.96);color:#dde;
+  font-size:11.5px;line-height:1.5;padding:7px 11px;
+  border-radius:7px;white-space:normal;width:max-content;max-width:280px;min-width:80px;
+  z-index:10000;pointer-events:none;
+  box-shadow:0 4px 18px rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.1);
+  font-weight:400;font-style:normal;text-align:left;
+  animation:tipIn .12s ease;
+}
+[data-tip]:hover::before{
+  content:'';position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);
+  border:4px solid transparent;border-top-color:rgba(8,8,8,.96);
+  z-index:10000;pointer-events:none;
+}
+[data-tip][data-tip-right]:hover::after{left:auto;right:0;transform:none}
+[data-tip][data-tip-left]:hover::after{left:0;right:auto;transform:none}
+[data-tip][data-tip-bottom]:hover::after{bottom:auto;top:calc(100% + 8px)}
+[data-tip][data-tip-bottom]:hover::before{bottom:auto;top:calc(100% + 4px);border-top-color:transparent;border-bottom-color:rgba(8,8,8,.96)}
+html.light [data-tip]:hover::after{background:rgba(20,20,20,.93);border-color:rgba(0,0,0,.18)}
+html.light [data-tip]:hover::before{border-top-color:rgba(20,20,20,.93)}
+html.light [data-tip][data-tip-bottom]:hover::before{border-bottom-color:rgba(20,20,20,.93);border-top-color:transparent}
+@keyframes tipIn{from{opacity:0;transform:translateX(-50%) translateY(4px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+/* tip-icon: a small circled ? shown inline next to labels */
+.tip-icon{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;border-radius:50%;
+  background:rgba(255,255,255,.11);color:var(--text3);
+  font-size:9px;font-weight:800;font-style:normal;
+  cursor:help;flex-shrink:0;margin-left:3px;line-height:1;
+  vertical-align:middle;transition:background .15s,color .15s;
+  position:relative;
+}
+html.light .tip-icon{background:rgba(0,0,0,.09);color:#888}
+.tip-icon:hover,.tip-icon:focus-visible{background:rgba(255,255,255,.22);color:var(--text)}
+html.light .tip-icon:hover{background:rgba(0,0,0,.18);color:#222}
+/* Stat badges in footer */
+.fixed-log-stat[data-tip]{cursor:default}
 </style>
 </head>
 <body data-poll-interval="10">
@@ -2146,7 +2281,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
         <span class="hdr-logo"><img src="/assets/claude-code-icon.svg" alt="Claude Code"></span>
       </span>
            <span class="hdr-brand">ClaudeLlama</span>
-      <span class="health-badge degraded" id="health-badge">
+      <span class="health-badge degraded" id="health-badge" data-tip="Router status. Healthy = router + Ollama both running. Degraded = router OK but Ollama unreachable. Unhealthy = router error. Watch this after model changes.">
         <span class="health-dot"></span>
         <span id="health-text">Checking...</span>
       </span>
@@ -2154,17 +2289,17 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
     <!-- Right: meta panel -->
     <div class="hdr-meta">
       <div class="chips">
-        <span class="chip" id="chip-ollama">Ollama</span>
-        <span class="chip mono">${String(cfg.local.host).replace(/[<>&]/g, "")}:${cfg.local.port}</span>
-        <span class="chip mono">${String(cfg.listenHost).replace(/[<>&]/g, "")}:${cfg.port}</span>
+        <span class="chip" id="chip-ollama" data-tip="Ollama local AI server status. Green = healthy, yellow = unreachable.">Ollama</span>
+        <span class="chip mono" data-tip="Ollama host:port — where the router sends local model requests. Change via ROUTER_OLLAMA_HOST / ROUTER_OLLAMA_PORT env vars.">${String(cfg.local.host).replace(/[<>&]/g, "")}:${cfg.local.port}</span>
+        <span class="chip mono" data-tip="This router is listening here. Your ANTHROPIC_BASE_URL should point to this address so Claude Code routes through the proxy.">${String(cfg.listenHost).replace(/[<>&]/g, "")}:${cfg.port}</span>
       </div>
       <div class="meta-status-row">
-        <div class="last-route-bar local" id="last-route-bar" title="No recent route yet"><span id="last-route-text">Awaiting route</span></div>
-        <div class="refresh-row" id="refresh-row" title="Last updated: pending">
+        <div class="last-route-bar local" id="last-route-bar" title="No recent route yet" data-tip="Last routing decision. LOCAL = request handled by your Ollama model (free). CLOUD = sent to Anthropic API (uses quota). Fallback = auto-switched after error."><span id="last-route-text">Awaiting route</span></div>
+        <div class="refresh-row" id="refresh-row" title="Last updated: pending" data-tip="Time until next automatic dashboard refresh. Stats, model status, and generation parameters reload on each cycle.">
           <span class="rdot" id="rdot"></span>
           <span>next <span id="next-poll">10</span>s</span>
         </div>
-        <button class="rbtn" onclick="void runCoalescedDashboardRefresh(true)" title="Refresh now (reloads metrics and generation sliders from server)">&#8635;</button>
+        <button class="rbtn" onclick="void runCoalescedDashboardRefresh(true)" title="Refresh now (reloads metrics and generation sliders from server)" data-tip="Force an immediate refresh of all dashboard data: health status, routing counters, model list, and generation parameters.">&#8635;</button>
       </div>
     </div>
     <!-- Theme toggle -->
@@ -2178,10 +2313,10 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
         <span class="res-title" id="dash-sys-h">System load</span>
       </div>
       <div class="res-grid">
-        <div class="res-metric"><div class="res-row"><span class="res-label">CPU</span><span class="res-val" id="r-cpu">—%</span></div><canvas class="spark" id="spark-cpu" width="200" height="12"></canvas></div>
-        <div class="res-metric"><div class="res-row"><span class="res-label">RAM</span><span class="res-val" id="r-ram">—%</span></div><canvas class="spark" id="spark-ram" width="200" height="12"></canvas></div>
-        <div class="res-metric"><div class="res-row"><span class="res-label">VRAM</span><span class="res-val" id="r-vram">—%</span></div><canvas class="spark" id="spark-vram" width="200" height="12"></canvas></div>
-        <div class="res-metric"><div class="res-row"><span class="res-label">GPU</span><span class="res-val" id="r-gpu">—%</span></div><canvas class="spark" id="spark-gpu" width="200" height="12"></canvas></div>
+        <div class="res-metric" data-tip="CPU usage across all cores. High CPU during local inference is normal — Ollama uses available threads."><div class="res-row"><span class="res-label">CPU</span><span class="res-val" id="r-cpu">—%</span></div><canvas class="spark" id="spark-cpu" width="200" height="12"></canvas></div>
+        <div class="res-metric" data-tip="System RAM usage. If this approaches 100%, Ollama may crash or slow down. Consider a smaller model or increase swap."><div class="res-row"><span class="res-label">RAM</span><span class="res-val" id="r-ram">—%</span></div><canvas class="spark" id="spark-ram" width="200" height="12"></canvas></div>
+        <div class="res-metric" data-tip="GPU VRAM usage. Ollama loads model weights here. If full, the model may offload layers to RAM, which is much slower."><div class="res-row"><span class="res-label">VRAM</span><span class="res-val" id="r-vram">—%</span></div><canvas class="spark" id="spark-vram" width="200" height="12"></canvas></div>
+        <div class="res-metric" data-tip="GPU compute utilization. Spikes during token generation are expected. Idle between requests is normal."><div class="res-row"><span class="res-label">GPU</span><span class="res-val" id="r-gpu">—%</span></div><canvas class="spark" id="spark-gpu" width="200" height="12"></canvas></div>
       </div>
     </div>
   </div>
@@ -2389,8 +2524,8 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   <section class="dash-card dash-card--models-runtime" aria-labelledby="dash-models-h">
     <div class="models-routing-bar" role="group" aria-labelledby="routing-mode-heading">
       <div class="models-routing-bar-text">
-        <span class="models-routing-bar-title" id="routing-mode-heading">API routing mode</span>
-        <span class="models-routing-bar-hint">Hybrid uses your thresholds and keywords. Claude only and Ollama only force every request.</span>
+        <span class="models-routing-bar-title" id="routing-mode-heading">API routing mode <i class="tip-icon" data-tip="Controls how every Claude Code request is handled. Hybrid is recommended: it sends routine tasks to your local Ollama model and only escalates to Anthropic cloud when needed — balancing quality and cost." data-tip-bottom="">?</i></span>
+        <span class="models-routing-bar-hint">Hybrid auto-routes by token count, tool load, and keywords. Claude only / Ollama only force every request to that provider.</span>
       </div>
       <div class="routing-mode-btn-group" role="group" aria-label="Choose API routing mode">
         <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--hybrid" id="routing-mode-btn-hybrid" data-mode="hybrid"></button>
@@ -2405,25 +2540,25 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
     <h2 class="dash-section-title" id="dash-models-h">Models &amp; routing</h2>
     <div class="models-toolbar-row">
       <div class="models-toolbar-default">
-        <label class="local-model-lbl" for="local-model-select">Default model</label>
+        <label class="local-model-lbl" for="local-model-select">Default model <i class="tip-icon" data-tip="The primary Ollama model used for local requests. Also acts as the tie-breaker when Smart routing cannot clearly prefer another pool model. Saved to hybrid.config.json immediately on change." data-tip-bottom="">?</i></label>
         <select id="local-model-select" class="local-model-select" title="Primary model in hybrid.config.json; tie-breaker for smart routing"></select>
       </div>
-      <label class="local-model-lbl models-smart-cb"><input type="checkbox" id="smart-routing-cb" checked> Smart routing</label>
+      <label class="local-model-lbl models-smart-cb" data-tip="When checked, the router picks the best model from your pool for each request — choosing smaller/faster models for quick tasks and larger models for heavy tool use or complex prompts. Uncheck to always use the Default model."><input type="checkbox" id="smart-routing-cb" checked> Smart routing</label>
       <span class="saved-msg routing-saved-msg" id="pool-save-msg" style="opacity:0" aria-live="polite">\u2713 Saved</span>
     </div>
     <div class="models-fast-row">
       <div class="models-toolbar-fast">
-        <label class="local-model-lbl" for="fast-model-select">Speed assist model</label>
+        <label class="local-model-lbl" for="fast-model-select">Speed assist model <i class="tip-icon" data-tip='A smaller, faster Ollama model boosted when the prompt is short and contains speed hints like "brief", "quick", "summary", or "tldr". Reduces latency for simple questions without switching to cloud. Leave (None) to always use the Default model.' data-tip-bottom="">?</i></label>
         <select id="fast-model-select" class="local-model-select" title="Optional smaller model (local.fast_model) boosted when the user asks for brief or quick answers. Saves automatically when changed.">
           <option value="">(None)</option>
         </select>
       </div>
-      <p class="models-fast-hint">Smaller Ollama tag preferred for speed-style prompts. Leave (None) to disable. Same pool / smart routing rules apply.</p>
+      <p class="models-fast-hint">Smaller Ollama tag preferred for speed-style prompts ("brief", "quick", "tldr"). Leave (None) to disable. Same pool / smart routing rules apply.</p>
     </div>
     <div class="local-pool-panel local-pool-panel--compact" id="local-pool-panel">
       <div class="pool-panel-block">
-        <div class="local-model-lbl" id="pool-chips-label">Pool (optional)</div>
-        <p class="pool-explainer" id="pool-explainer">Pick which installed models local routing may use. Leave all unchecked to allow the full library.</p>
+        <div class="local-model-lbl" id="pool-chips-label">Pool (optional) <i class="tip-icon" data-tip="Restrict which installed Ollama models the router is allowed to use. Useful if you have many models but only want a specific subset for Claude Code. Leave all unchecked to allow any installed model. Smart routing will pick among checked models based on task type." data-tip-bottom="">?</i></div>
+        <p class="pool-explainer" id="pool-explainer">Check models to include in local routing. Leave all unchecked to allow the full installed library. Smart routing picks among checked models by task type.</p>
         <p class="params-sub pool-hint-line" id="pool-hint" role="status"></p>
         <div id="pool-chips-root" class="pool-chips-grid" role="group" aria-labelledby="pool-chips-label"></div>
       </div>
@@ -2435,8 +2570,8 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
     <div class="params-card-header">
     <h2 class="dash-section-title" id="dash-gen-h">Generation parameters</h2>
     <div class="params-toolbar">
-      <button type="button" class="pbtn pbtn-secondary" id="btn-open-gen-json" onclick="openModelParamsFilesModal()">Edit config (JSON)…</button>
-      <button type="button" class="pbtn pbtn-secondary" id="btn-open-gen-settings" onclick="openSettingsModal()">Generation settings…</button>
+      <button type="button" class="pbtn pbtn-secondary" id="btn-open-gen-json" onclick="openModelParamsFilesModal()" data-tip="Open the raw JSON editor for model-params.json (global defaults) and model-params-per-model.json (per-model overrides). Edit directly when you want fine-grained control." data-tip-left="">Edit config (JSON)…</button>
+      <button type="button" class="pbtn pbtn-secondary" id="btn-open-gen-settings" onclick="openSettingsModal()" data-tip="Open the Generation settings table — shows Built-in defaults, Global overrides, per-Model overrides, and the Effective values that will be sent on the next local request. Save changes here." data-tip-left="">Generation settings…</button>
     </div>
     </div>
   <div class="params-panel">
@@ -2444,24 +2579,24 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
       <span class="params-hdr-label">Sliders</span>
       <div class="pact">
         <span class="saved-msg" id="saved-msg" aria-live="polite">Saved &#10003;</span>
-        <button type="button" class="pbtn pbtn-reset" onclick="void resetParams()">Reset defaults</button>
+        <button type="button" class="pbtn pbtn-reset" onclick="void resetParams()" data-tip="Reset all sliders and number inputs to the built-in defaults for the active model. Does not save automatically — click Save in Generation settings to persist.">Reset defaults</button>
       </div>
     </div>
     <div class="params-grid">
-      ${paramSlider("temperature", "Temperature", "Randomness. Lower = focused.", 0, 2, 0.05, p.temperature)}
-      ${paramSlider("top_p", "Top P", "Nucleus sampling cutoff.", 0, 1, 0.05, p.top_p)}
-      ${paramSlider("top_k", "Top K", "Vocabulary pool size.", 1, 100, 1, p.top_k)}
-      ${paramNumber("num_ctx", "Context length", "Tokens in context window. Affects VRAM.", 512, 131072, p.num_ctx)}
-      ${paramNumber("seed", "Seed", "0 = random. Fixed = reproducible.", -1, 999999, p.seed)}
-      ${paramSlider("repeat_penalty", "Repeat penalty", "Discourages repetition. 1.0 = off.", 1, 1.5, 0.01, p.repeat_penalty)}
+      ${paramSlider("temperature", "Temperature", "Randomness. Lower = focused.", 0, 2, 0.05, p.temperature, "Controls creativity/randomness. 0.1 = deterministic & precise (great for code). 0.7 = balanced. 1.5+ = creative/unpredictable. For coding tasks keep this under 0.8.")}
+      ${paramSlider("top_p", "Top P", "Nucleus sampling cutoff.", 0, 1, 0.05, p.top_p, "Nucleus sampling: only consider tokens whose cumulative probability is ≤ this value. 0.9 = default Ollama. Lower = more focused. Works alongside Temperature — reduce one if you reduce the other.")}
+      ${paramSlider("top_k", "Top K", "Vocabulary pool size.", 1, 100, 1, p.top_k, "Limits sampling to the top K most likely next tokens. Lower = safer, more predictable output. 40 is typical. 0 = disabled (use Top P alone).")}
+      ${paramNumber("num_ctx", "Context length", "Tokens in context window. Affects VRAM.", 512, 131072, p.num_ctx, "Number of tokens the model holds in memory (prompt + response). Larger = longer conversations but uses more VRAM. The router auto-escalates to cloud when the conversation fills this window.")}
+      ${paramNumber("seed", "Seed", "0 = random. Fixed = reproducible.", -1, 999999, p.seed, "Random seed for generation. -1 or 0 = random output every time. A fixed positive value gives identical responses for identical prompts — useful for debugging or reproducible tests.")}
+      ${paramSlider("repeat_penalty", "Repeat penalty", "Discourages repetition. 1.0 = off.", 1, 1.5, 0.01, p.repeat_penalty, "Penalises the model for repeating the same phrases or tokens. 1.0 = no penalty (off). 1.1 = mild. 1.3+ = strong. Increase if responses loop or repeat themselves.")}
     </div>
     <span class="adv-toggle" id="adv-toggle" onclick="toggleAdv()">+ Advanced</span>
     <div class="params-adv" id="params-adv">
-      ${paramNumber("num_predict", "Max tokens", "Output length. -1 = unlimited.", -1, 4096, p.num_predict)}
-      ${paramSlider("min_p", "Min P", "Min probability vs top token.", 0, 0.2, 0.01, p.min_p)}
-      ${paramNumber("repeat_last_n", "Repeat last N", "Repetition check window.", 0, 512, p.repeat_last_n)}
-      ${paramSlider("presence_penalty", "Presence penalty", "Penalise seen tokens.", 0, 1, 0.05, p.presence_penalty)}
-      ${paramSlider("frequency_penalty", "Frequency penalty", "Penalise frequent tokens.", 0, 1, 0.05, p.frequency_penalty)}
+      ${paramNumber("num_predict", "Max tokens", "Output length. -1 = unlimited.", -1, 4096, p.num_predict, "Maximum number of tokens the model will generate in one response. -1 = unlimited (let the model decide). Set a limit to cap very long responses or reduce latency.")}
+      ${paramSlider("min_p", "Min P", "Min probability vs top token.", 0, 0.2, 0.01, p.min_p, "Minimum probability relative to the top token. An alternative to Top P. Tokens below this fraction of the top token's probability are filtered out. 0 = disabled. Helps cut very low-probability tokens.")}
+      ${paramNumber("repeat_last_n", "Repeat last N", "Repetition check window.", 0, 512, p.repeat_last_n, "How many previous tokens to scan when applying Repeat penalty. 0 = disabled. 64 = typical. 128 = longer memory for repetition detection. Higher values use slightly more compute.")}
+      ${paramSlider("presence_penalty", "Presence penalty", "Penalise seen tokens.", 0, 1, 0.05, p.presence_penalty, "Penalises any token that has appeared at all in the conversation (OpenAI-style). Higher = more topic diversity and less repetition of concepts. 0 = off.")}
+      ${paramSlider("frequency_penalty", "Frequency penalty", "Penalise frequent tokens.", 0, 1, 0.05, p.frequency_penalty, "Penalises tokens proportional to how often they appear. Unlike Presence penalty this scales with frequency. Higher = less repetition of common words. 0 = off.")}
     </div>
   </div>
   </section>
@@ -2480,12 +2615,12 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
   <section class="fixed-log-panel">
     <div class="fixed-log-head">
       <div class="fixed-log-head-main">
-        <div class="fixed-log-title">Router log <span class="fixed-log-count">(<span id="fixedLogCount">0</span>)</span></div>
+        <div class="fixed-log-title" data-tip="Real-time log of every routing decision. Each line shows whether the request went to your local Ollama model or to Anthropic cloud, and why.">Router log <span class="fixed-log-count">(<span id="fixedLogCount">0</span>)</span></div>
         <div class="fixed-log-preview" id="fixedLogPreview" aria-live="polite" title="Latest log line (visible when the log panel is collapsed)"></div>
         <div class="fixed-log-stats" aria-label="Routing counters">
-          <span class="fixed-log-stat local"><strong id="cnt-local">0</strong> Local</span>
-          <span class="fixed-log-stat cloud"><strong id="cnt-cloud">0</strong> Cloud</span>
-          <span class="fixed-log-stat total"><strong id="cnt-total">0</strong> Total</span>
+          <span class="fixed-log-stat local" data-tip="Requests handled by your local Ollama model this session. Free, private, no API quota used."><strong id="cnt-local">0</strong> Local</span>
+          <span class="fixed-log-stat cloud" data-tip="Requests sent to Anthropic cloud (Claude API) this session. These consume your API quota."><strong id="cnt-cloud">0</strong> Cloud</span>
+          <span class="fixed-log-stat total" data-tip="Total requests proxied this session (Local + Cloud + any fallbacks)."><strong id="cnt-total">0</strong> Total</span>
         </div>
       </div>
       <div class="fixed-log-tools">
@@ -2520,10 +2655,10 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
         </div>
         <div class="settings-actions settings-actions--footer">
           <span class="saved-per-msg" id="settings-saved-global-msg">Saved \u2713</span>
-          <button type="button" class="pbtn pbtn-save" id="save-global-settings-btn">Save global</button>
+          <button type="button" class="pbtn pbtn-save" id="save-global-settings-btn" data-tip="Save the Effective column values as global defaults (model-params.json). Only values that differ from the built-in row are stored — keeps the file minimal.">Save global</button>
           <span class="saved-per-msg" id="settings-saved-per-msg">Saved \u2713</span>
-          <button type="button" class="pbtn pbtn-save" id="save-per-model-btn">Save model overrides</button>
-          <button type="button" class="pbtn pbtn-reset" id="clear-per-model-btn">Clear model overrides</button>
+          <button type="button" class="pbtn pbtn-save" id="save-per-model-btn" data-tip="Save the Model column values as overrides for this specific Ollama tag (model-params-per-model.json). These apply on top of Global when this exact model is active.">Save model overrides</button>
+          <button type="button" class="pbtn pbtn-reset" id="clear-per-model-btn" data-tip="Remove all per-model overrides for this tag. The model will fall back to Global defaults. Cannot be undone without manually editing model-params-per-model.json.">Clear model overrides</button>
         </div>
       </div>
     </div>
@@ -2661,6 +2796,13 @@ function applyRoutingModeButton(m, quota){
     b.setAttribute('aria-label','Routing mode: '+routingModeLabelFor(mode)+(disabled?' (quotas exceeded)':''));
     b.setAttribute('aria-pressed',active?'true':'false');
     b.title=disabled?(routingModeLabelFor(mode)+' unavailable: quotas exceeded'):(active?(routingModeLabelFor(mode)+' active'):'Switch to '+routingModeLabelFor(mode));
+    var tips={
+      hybrid:'Smart routing: automatically sends simple tasks to Ollama (free, private) and escalates complex prompts, large contexts, or routing keywords to Claude. Best default for most users — saves ~40–70% cloud cost.',
+      cloud:'All requests go to Anthropic cloud (Claude). Full model quality for every message. Uses API quota for every request — no local inference. Use when local quality is insufficient for your current task.',
+      local:'All requests go to your local Ollama model. Fully offline and private — no API quota used. Quality is limited to your local model. Ideal for sensitive codebases or when internet is unavailable.'
+    };
+    if(disabled) b.removeAttribute('data-tip');
+    else b.setAttribute('data-tip', tips[mode]||'');
   });
   var status=document.getElementById('routing-mode-status');
   if(status){
@@ -4432,6 +4574,23 @@ const server = http.createServer(async (req, res) => {
               ? CFG.privacy.cloud_redaction.custom_terms.length
               : 0,
           },
+          privacy_project_obfuscation: {
+            enabled: !!(CFG.privacy.project_obfuscation || {}).enabled,
+            auto_detect_filenames: !!(CFG.privacy.project_obfuscation || {})
+              .auto_detect_filenames,
+            auto_detect_identifiers: !!(CFG.privacy.project_obfuscation || {})
+              .auto_detect_identifiers,
+            alias_prefix: (CFG.privacy.project_obfuscation || {}).alias_prefix || "proj",
+            project_terms_count: Array.isArray(
+              (CFG.privacy.project_obfuscation || {}).project_terms,
+            )
+              ? CFG.privacy.project_obfuscation.project_terms.length
+              : 0,
+          },
+          cascade_quality: !!CFG.local.cascadeQuality,
+          always_local_terms_count: (CFG.routing.alwaysLocalTerms || []).length,
+          force_local_if_privacy_terms: !!CFG.routing.forceLocalIfPrivacyTerms,
+          privacy_custom_terms_count: (CFG.routing.privacyCustomTerms || []).length,
         },
       }),
     );
@@ -5068,7 +5227,13 @@ const server = http.createServer(async (req, res) => {
   } else if (mode === "local") {
     routeResult = { dest: "local", reason: "routing mode: Ollama only" };
   } else {
-    routeResult = analyzeMessages(body, { ...CFG.routing, effectiveNumCtx: effectiveParamsFor(CFG.local.model).num_ctx });
+    routeResult = analyzeMessages(body, {
+      ...CFG.routing,
+      effectiveNumCtx: effectiveParamsFor(CFG.local.model).num_ctx,
+      alwaysLocalTerms: CFG.routing.alwaysLocalTerms || [],
+      forceLocalIfPrivacyTerms: !!CFG.routing.forceLocalIfPrivacyTerms,
+      privacyCustomTerms: CFG.routing.privacyCustomTerms || [],
+    });
   }
   if (routeResult.dest === "cloud") {
     routeTo("cloud", routeResult.reason, false, { cloud_model: body.model });

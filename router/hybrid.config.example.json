@@ -9,11 +9,12 @@
     "model": "VladimirGav/gemma4-26b-16GB-VRAM:latest",
     "fast_model": "gemma4:e4b",
     "smart_routing": true,
-    "models": []
+    "models": [],
+    "cascadeQuality": true
   },
   "routing": {
     "mode": "hybrid",
-    "tokenThreshold": 5000,
+    "tokenThreshold": 32000,
     "fileReadThreshold": 10,
     "keywords": [
       "architect",
@@ -25,8 +26,13 @@
       "system design",
       "data model",
       "api design",
-      "deep reason"
-    ]
+      "deep reason",
+      "vulnerabilit",
+      "threat model"
+    ],
+    "alwaysLocalTerms": [],
+    "forceLocalIfPrivacyTerms": false,
+    "privacyCustomTerms": []
   },
   "privacy": {
     "cloud_redaction": {
@@ -39,6 +45,16 @@
       "redact_ids": true,
       "redact_identifiers": false,
       "custom_terms": []
+    },
+    "project_obfuscation": {
+      "enabled": true,
+      "project_terms": [],
+      "alias_prefix": "proj",
+      "auto_detect_filenames": true,
+      "auto_detect_identifiers": false,
+      "preserve_extensions": true,
+      "scan_system_prompt": true,
+      "scan_tool_results": true
     }
   }
 }

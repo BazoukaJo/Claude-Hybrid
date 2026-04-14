@@ -44,6 +44,9 @@ function applyUserConfig(CFG, user) {
       CFG.local.fast_model =
         typeof L.fast_model === "string" ? L.fast_model.trim() : "";
     }
+    if (typeof L.cascadeQuality === "boolean") {
+      CFG.local.cascadeQuality = L.cascadeQuality;
+    }
   }
   if (user.routing && typeof user.routing === "object") {
     const r = user.routing;
@@ -59,6 +62,19 @@ function applyUserConfig(CFG, user) {
     if (Object.prototype.hasOwnProperty.call(r, "mode")) {
       CFG.routing.mode = normalizeRoutingMode(r.mode);
     }
+    if (Array.isArray(r.alwaysLocalTerms)) {
+      CFG.routing.alwaysLocalTerms = r.alwaysLocalTerms
+        .map((t) => String(t || "").trim())
+        .filter(Boolean);
+    }
+    if (typeof r.forceLocalIfPrivacyTerms === "boolean") {
+      CFG.routing.forceLocalIfPrivacyTerms = r.forceLocalIfPrivacyTerms;
+    }
+    if (Array.isArray(r.privacyCustomTerms)) {
+      CFG.routing.privacyCustomTerms = r.privacyCustomTerms
+        .map((t) => String(t || "").trim())
+        .filter(Boolean);
+    }
   }
   if (user.display && typeof user.display === "object") {
     const d = user.display;
@@ -68,9 +84,9 @@ function applyUserConfig(CFG, user) {
   }
   if (user.privacy && typeof user.privacy === "object") {
     const p = user.privacy;
+    if (!CFG.privacy || typeof CFG.privacy !== "object") CFG.privacy = {};
     if (p.cloud_redaction && typeof p.cloud_redaction === "object") {
       const cr = p.cloud_redaction;
-      if (!CFG.privacy || typeof CFG.privacy !== "object") CFG.privacy = {};
       if (
         !CFG.privacy.cloud_redaction ||
         typeof CFG.privacy.cloud_redaction !== "object"
@@ -94,6 +110,36 @@ function applyUserConfig(CFG, user) {
         CFG.privacy.cloud_redaction.custom_terms = cr.custom_terms
           .map((term) => String(term || "").trim())
           .filter(Boolean);
+      }
+    }
+    if (p.project_obfuscation && typeof p.project_obfuscation === "object") {
+      const po = p.project_obfuscation;
+      if (
+        !CFG.privacy.project_obfuscation ||
+        typeof CFG.privacy.project_obfuscation !== "object"
+      ) {
+        CFG.privacy.project_obfuscation = {};
+      }
+      for (const key of [
+        "enabled",
+        "auto_detect_filenames",
+        "auto_detect_identifiers",
+        "preserve_extensions",
+        "scan_system_prompt",
+        "scan_tool_results",
+      ]) {
+        if (typeof po[key] === "boolean")
+          CFG.privacy.project_obfuscation[key] = po[key];
+      }
+      if (typeof po.alias_prefix === "string") {
+        const cleaned = po.alias_prefix.trim().replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+        if (cleaned.length >= 1)
+          CFG.privacy.project_obfuscation.alias_prefix = cleaned.slice(0, 10);
+      }
+      if (Array.isArray(po.project_terms)) {
+        CFG.privacy.project_obfuscation.project_terms = po.project_terms
+          .map((t) => String(t || "").trim())
+          .filter((t) => t.length >= 3);
       }
     }
   }
