@@ -67,6 +67,10 @@ Started app dashboard with a loaded model and visible pool:
 
 ![ClaudeLlama dashboard with loaded model and pool](assets/ux-review-screenshots/claudellama-dashboard-loaded-pool.png)
 
+Updated dashboard layout (routing controls + quality panel):
+
+![Claude Hybrid dashboard overview](assets/ux-review-screenshots/claude-hybrid-dashboard.png)
+
 ---
 
 ## One-time setup

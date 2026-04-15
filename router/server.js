@@ -1960,6 +1960,18 @@ a{color:inherit}
 .routing-mode-status{display:none;margin-top:8px;padding:8px 10px;border-radius:10px;border:1px solid rgba(148,163,184,.22);background:rgba(148,163,184,.08);font-size:11px;line-height:1.45;color:var(--text2)}
 .routing-mode-status.is-visible{display:block}
 .routing-mode-status strong{color:var(--text)}
+.routing-mode-controls{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;align-items:stretch;flex:1 1 28rem}
+.routing-mode-btn-group--privacy{justify-content:flex-end}
+.routing-mode-btn--privacy{min-width:112px;flex:0 1 auto;align-items:flex-start;padding:10px 14px;text-align:left}
+.routing-mode-btn--privacy .routing-mode-btn-main{font-size:12px}
+.routing-mode-btn--privacy .routing-mode-btn-sub{font-size:10px;opacity:.92}
+.routing-mode-btn--privacy.is-active{
+  outline:3px solid rgba(255,255,255,.42);
+  outline-offset:0;
+  transform:translateY(-1px) scale(1.02);
+  filter:saturate(1.14) brightness(1.08);
+  box-shadow:0 0 0 1px rgba(255,255,255,.16),0 12px 24px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.18);
+}
 html.light .routing-mode-btn--choice.is-disabled,
 html.light .routing-mode-btn--choice:disabled{background:rgba(148,163,184,.16) !important;color:#64748b !important;border-color:rgba(100,116,139,.24) !important}
 html.light .routing-mode-status{background:rgba(148,163,184,.12);border-color:rgba(100,116,139,.2);color:#475569}
@@ -1981,6 +1993,10 @@ html.light .routing-mode-btn--choice.is-active{
 }
 html.light .routing-mode-btn--choice.is-active .routing-mode-btn-main,
 html.light .routing-mode-btn--choice.is-active .routing-mode-btn-sub{color:#111827}
+html.light .routing-mode-btn--privacy.is-active{
+  outline-color:rgba(15,23,42,.26);
+  box-shadow:0 0 0 1px rgba(15,23,42,.08),0 10px 18px rgba(15,23,42,.12),inset 0 1px 0 rgba(255,255,255,.55);
+}
 /* meta panel */
 .hdr-meta{display:flex;flex-direction:column;align-items:flex-end;gap:.2rem;background:var(--meta-bg);border:1px solid var(--meta-border);border-radius:.4rem;padding:.22rem .45rem;max-width:min(100%,34rem)}
 .chips{display:flex;flex-wrap:wrap;gap:.18rem;justify-content:flex-end}
@@ -2078,6 +2094,8 @@ h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;le
     align-items:stretch;
     gap:8px;
   }
+  .routing-mode-controls{width:100%}
+  .routing-mode-btn-group--privacy{width:100%}
   .routing-mode-btn--section{width:100%}
 }
 .models-toolbar-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 14px;margin-bottom:6px}
@@ -2402,6 +2420,7 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
 /* Usage: data-tip="text" on any element. Use data-tip-right / data-tip-left  */
 /* / data-tip-bottom modifiers for direction. .tip-icon = inline ? badge.     */
 [data-tip]{position:relative;cursor:default}
+[data-tip]:hover,[data-tip]:focus-visible{z-index:1200}
 [data-tip]:hover::after{
   content:attr(data-tip);
   position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);
@@ -2473,8 +2492,6 @@ html.light .tip-icon:hover{background:rgba(0,0,0,.18);color:#222}
         <span class="chip" id="chip-ollama" data-tip="Ollama local AI server status. Green = healthy, yellow = unreachable.">Ollama</span>
         <span class="chip mono" data-tip="Ollama host:port — where the router sends local model requests. Change via ROUTER_OLLAMA_HOST / ROUTER_OLLAMA_PORT env vars.">${String(cfg.local.host).replace(/[<>&]/g, "")}:${cfg.local.port}</span>
         <span class="chip mono" data-tip="This router is listening here. Your ANTHROPIC_BASE_URL should point to this address so Claude Code routes through the proxy.">${String(cfg.listenHost).replace(/[<>&]/g, "")}:${cfg.port}</span>
-        <button type="button" class="chip chip--toggle${cfg.privacy.project_obfuscation.enabled ? " is-on" : ""}" id="privacy-obfusc-btn" data-tip="Project obfuscation: replaces project filenames and terms with aliases before sending to cloud. Click to toggle." onclick="togglePrivacy('obfuscation','obfusc')"><span class="chip-tdot"></span>OBFUSC</button>
-        <button type="button" class="chip chip--toggle${cfg.privacy.cloud_redaction.enabled ? " is-on" : ""}" id="privacy-redact-btn" data-tip="Cloud redaction: strips paths, emails, secrets and IDs from Anthropic-bound requests. Click to toggle." onclick="togglePrivacy('redaction','redact')"><span class="chip-tdot"></span>REDACT</button>
       </div>
       <div class="meta-status-row">
         <div class="last-route-bar local" id="last-route-bar" title="No recent route yet" data-tip="Last routing decision. LOCAL = request handled by your Ollama model (free). CLOUD = sent to Anthropic API (uses quota). Fallback = auto-switched after error."><span id="last-route-text">Awaiting route</span></div>
@@ -2699,10 +2716,16 @@ html.light .tip-icon:hover{background:rgba(0,0,0,.18);color:#222}
         <span class="models-routing-bar-title" id="routing-mode-heading">API routing mode <i class="tip-icon" data-tip="Controls how every Claude Code request is handled. Hybrid is recommended: it sends routine tasks to your local Ollama model and only escalates to Anthropic cloud when needed — balancing quality and cost." data-tip-bottom="">?</i></span>
         <span class="models-routing-bar-hint">Hybrid auto-routes by token count, tool load, and keywords. Claude only / Ollama only force every request to that provider.</span>
       </div>
-      <div class="routing-mode-btn-group" role="group" aria-label="Choose API routing mode">
-        <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--hybrid" id="routing-mode-btn-hybrid" data-mode="hybrid"></button>
-        <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--cloud" id="routing-mode-btn-cloud" data-mode="cloud"></button>
-        <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--local" id="routing-mode-btn-local" data-mode="local"></button>
+      <div class="routing-mode-controls">
+        <div class="routing-mode-btn-group" role="group" aria-label="Choose API routing mode">
+          <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--hybrid" id="routing-mode-btn-hybrid" data-mode="hybrid"></button>
+          <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--cloud" id="routing-mode-btn-cloud" data-mode="cloud"></button>
+          <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--choice routing-mode--local" id="routing-mode-btn-local" data-mode="local"></button>
+        </div>
+        <div class="routing-mode-btn-group routing-mode-btn-group--privacy" role="group" aria-label="Cloud privacy controls">
+          <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--privacy routing-mode--local${cfg.privacy.project_obfuscation.enabled ? " is-active" : ""}" id="privacy-obfusc-btn" aria-pressed="${cfg.privacy.project_obfuscation.enabled ? "true" : "false"}" data-tip="Project obfuscation: replaces project filenames and terms with aliases before sending to cloud. Click to toggle." data-tip-bottom="" onclick="togglePrivacy('obfuscation','obfusc')"><span class="routing-mode-btn-main">OBFUSC</span><span class="routing-mode-btn-sub">${cfg.privacy.project_obfuscation.enabled ? "Enabled" : "Disabled"}</span></button>
+          <button type="button" class="routing-mode-btn routing-mode-btn--section routing-mode-btn--privacy routing-mode--local${cfg.privacy.cloud_redaction.enabled ? " is-active" : ""}" id="privacy-redact-btn" aria-pressed="${cfg.privacy.cloud_redaction.enabled ? "true" : "false"}" data-tip="Cloud redaction: strips paths, emails, secrets and IDs from Anthropic-bound requests. Click to toggle." data-tip-bottom="" onclick="togglePrivacy('redaction','redact')"><span class="routing-mode-btn-main">REDACT</span><span class="routing-mode-btn-sub">${cfg.privacy.cloud_redaction.enabled ? "Enabled" : "Disabled"}</span></button>
+        </div>
       </div>
     </div>
     <div class="routing-mode-status" id="routing-mode-status" role="status" aria-live="polite"></div>
@@ -3313,6 +3336,46 @@ function vramStripTagLoose(s){
   if(!/^[a-z0-9._+-]+$/i.test(t))return n;
   return n.slice(0,i);
 }
+
+function getActivePoolSelectionFromUi(){
+  const ps=document.getElementById('local-pool-select');
+  if(!ps)return new Set();
+  const out=new Set();
+  for(const opt of ps.selectedOptions){
+    const n=String(opt.value||'').trim();
+    if(n)out.add(n);
+  }
+  return out;
+}
+
+function poolContainsModel(poolSet, modelName){
+  if(!poolSet||poolSet.size===0)return true;
+  const n=String(modelName||'').trim();
+  if(!n)return false;
+  if(poolSet.has(n))return true;
+  const base=vramStripTagLoose(n);
+  if(poolSet.has(base))return true;
+  for(const item of poolSet){
+    if(vramStripTagLoose(item)===base)return true;
+  }
+  return false;
+}
+
+function filterRowsByPool(rows,poolSet){
+  if(!Array.isArray(rows)||rows.length===0)return [];
+  if(!poolSet||poolSet.size===0)return rows;
+  return rows.filter((row)=>row&&poolContainsModel(poolSet,row.name));
+}
+
+function applyPoolFilterToRuntimeCards(){
+  const root=document.getElementById('vram-cards-root');
+  if(!root)return;
+  const poolSet=getActivePoolSelectionFromUi();
+  root.querySelectorAll('.model-card[data-model-name]').forEach((card)=>{
+    const modelName=card.getAttribute('data-model-name')||'';
+    card.closest('.col')?.classList.toggle('d-none',!poolContainsModel(poolSet,modelName));
+  });
+}
 function vramNamesMatch(cfg, psName){
   const a=String(cfg||'').trim().toLowerCase();
   const b=String(psName||'').trim().toLowerCase();
@@ -3597,8 +3660,11 @@ function renderVramSection(d){
   }
   const list=Array.isArray(d.loaded_list)?d.loaded_list:[];
   const poolList=Array.isArray(d.pool_models)?d.pool_models:[];
+  const poolSet=getActivePoolSelectionFromUi();
+  const filteredList=filterRowsByPool(list,poolSet);
+  const filteredPoolList=filterRowsByPool(poolList,poolSet);
   const cfg=d.configured_model||'';
-  if(list.length===0&&poolList.length===0){
+  if(filteredList.length===0&&filteredPoolList.length===0){
     buildVramEmptyState(root, d);
     if(hint){
       hint.textContent='';
@@ -3606,7 +3672,7 @@ function renderVramSection(d){
     }
     return;
   }
-  for(const row of list){
+  for(const row of filteredList){
     if(!row||!row.name)continue;
     const col=document.createElement('div');
     col.className='col';
@@ -3614,11 +3680,11 @@ function renderVramSection(d){
     buildVramLoadedCard(col, row, d);
     root.appendChild(col);
   }
-  for(const row of poolList){
+  for(const row of filteredPoolList){
     buildVramPoolCard(root, row);
   }
   if(hint){
-    if(list.length===0&&poolList.length>0){
+    if(filteredList.length===0&&filteredPoolList.length>0){
       hint.textContent='No pooled model is currently loaded in VRAM. Settings and model details remain available below.';
       hint.style.display='block';
     }else if(!d.configured_loaded&&cfg){
@@ -3648,6 +3714,7 @@ async function refreshModel(){
     const r=await fetchWithTimeout('/api/model-status',25000); if(!r.ok)return;
     const d=await r.json();
     renderVramSection(d);
+    applyPoolFilterToRuntimeCards();
     applyCapabilityStates(d.capabilities);
     const reqEl=document.querySelector('.js-vram-router-req');
     if(reqEl){
@@ -4407,6 +4474,10 @@ function applyPrivacyChip(id,on){
   var btn=document.getElementById(id);
   if(!btn)return;
   btn.classList.toggle('is-on',!!on);
+  btn.classList.toggle('is-active',!!on);
+  btn.setAttribute('aria-pressed',on?'true':'false');
+  var sub=btn.querySelector('.routing-mode-btn-sub');
+  if(sub) sub.textContent=on?'Enabled':'Disabled';
 }
 async function togglePrivacy(type,shortId){
   var btnId='privacy-'+shortId+'-btn';
@@ -4663,6 +4734,7 @@ async function persistRoutingSettingsNow(){
     }
     if(msg){msg.style.opacity=1;setTimeout(()=>{msg.style.opacity=0;},1800);}
     await refreshOllamaModelList();
+    await refreshModel();
     await refreshRouteStats();
   }catch{
     alert('Routing save failed');
@@ -4670,7 +4742,10 @@ async function persistRoutingSettingsNow(){
 }
 document.getElementById('pool-chips-root')?.addEventListener('change',(e)=>{
   const t=e.target;
-  if(t&&t.matches&&t.matches('input[type=checkbox]')) schedulePersistRoutingSettings();
+  if(t&&t.matches&&t.matches('input[type=checkbox]')){
+    applyPoolFilterToRuntimeCards();
+    schedulePersistRoutingSettings();
+  }
 });
 document.getElementById('smart-routing-cb')?.addEventListener('change',()=>schedulePersistRoutingSettings());
 document.getElementById('fast-model-select')?.addEventListener('change',()=>schedulePersistRoutingSettings());
