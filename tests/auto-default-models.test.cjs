@@ -5,16 +5,16 @@ const assert = require('node:assert');
 const { pickAutoDefaultModels, primaryPreferenceScore } = require('../router/lib/auto-default-models');
 
 test('primaryPreferenceScore favors kit Gemma 26B id', () => {
-  assert.ok(primaryPreferenceScore('VladimirGav/gemma4-26b-16GB-VRAM:latest') > primaryPreferenceScore('llama3.2:3b'));
+  assert.ok(primaryPreferenceScore('gemma4:26b-a4b-it-q4_k_m') > primaryPreferenceScore('llama3.2:3b'));
 });
 
-test('pickAutoDefaultModels prefers VladimirGav Gemma 26B and gemma4:e4b as fast', () => {
+test('pickAutoDefaultModels prefers gemma4:26b and gemma4:e4b as fast', () => {
   const r = pickAutoDefaultModels([
     { name: 'llama3.2:3b', size: 2e9 },
-    { name: 'VladimirGav/gemma4-26b-16GB-VRAM:latest', size: 15e9 },
+    { name: 'gemma4:26b-a4b-it-q4_k_m', size: 15e9 },
     { name: 'gemma4:e4b', size: 4e9 },
   ]);
-  assert.strictEqual(r.primary, 'VladimirGav/gemma4-26b-16GB-VRAM:latest');
+  assert.strictEqual(r.primary, 'gemma4:26b-a4b-it-q4_k_m');
   assert.strictEqual(r.fast, 'gemma4:e4b');
 });
 

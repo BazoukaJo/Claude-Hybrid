@@ -12,7 +12,7 @@ function norm(s) {
  */
 function primaryPreferenceScore(name) {
   const n = norm(name);
-  if (n.includes('vladimirgav/gemma4-26b') || n.includes('gemma4-26b-16gb')) return 100;
+  if (n.includes('gemma4') && n.includes('26b')) return 100;
   if ((/26b|22b|32b|70b|405b|120b/.test(n) || /mixtral|command-r\+?|deepseek-r1|qwen2\.5:72|llama3\.1:70|llama3\.3/.test(n)) && !/embed|embedding|rerank|vision|vl-|llava|moondream/.test(n)) {
     return 80;
   }

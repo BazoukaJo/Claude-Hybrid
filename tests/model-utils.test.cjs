@@ -54,11 +54,11 @@ test('pickRunningModel exact match on configured model', () => {
   const ps = {
     models: [
       { model: 'first:latest', name: 'first:latest' },
-      { model: 'VladimirGav/gemma4-26b-16GB-VRAM', name: 'VladimirGav/gemma4-26b-16GB-VRAM' },
+      { model: 'gemma4:26b-a4b-it-q4_k_m', name: 'gemma4:26b-a4b-it-q4_k_m' },
     ],
   };
-  const picked = pickRunningModel(ps, 'VladimirGav/gemma4-26b-16GB-VRAM');
-  assert.strictEqual(psModelId(picked), 'VladimirGav/gemma4-26b-16GB-VRAM');
+  const picked = pickRunningModel(ps, 'gemma4:26b-a4b-it-q4_k_m');
+  assert.strictEqual(psModelId(picked), 'gemma4:26b-a4b-it-q4_k_m');
 });
 
 test('pickRunningModel does not always use first row when second matches', () => {
@@ -82,7 +82,7 @@ test('pickRunningModel does not match short name inside long path (substring bug
     models: [{ model: 'gemma4:latest', name: 'gemma4:latest' }],
   };
   assert.strictEqual(
-    pickRunningModel(ps, 'VladimirGav/gemma4-26b-16GB-VRAM'),
+    pickRunningModel(ps, 'myorg/gemma4-custom:latest'),
     null,
   );
 });
@@ -107,7 +107,7 @@ test('modelNamesMatch and stripOptionalOllamaTagNorm', () => {
   assert.strictEqual(modelNamesMatch('Foo:bar', 'foo:bar'), true);
   assert.strictEqual(modelNamesMatch('Foo', 'foo:latest'), true);
   assert.strictEqual(
-    modelNamesMatch('VladimirGav/gemma4-26b-16GB-VRAM', 'gemma4:latest'),
+    modelNamesMatch('myorg/gemma4-custom:latest', 'gemma4:latest'),
     false,
   );
   assert.strictEqual(stripOptionalOllamaTagNorm('a:b'), 'a');

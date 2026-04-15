@@ -31,6 +31,8 @@ const {
   saveLocalModel,
   saveLocalRoutingSettings,
   saveRoutingMode,
+  savePrivacyObfuscationEnabled,
+  savePrivacyRedactionEnabled,
   localModelUnsetInConfigFile,
   localFastUnsetInConfigFile,
   configPath,
@@ -100,7 +102,7 @@ const CFG = {
       const p = Number.parseInt(process.env.ROUTER_OLLAMA_PORT || "11434", 10);
       return Number.isFinite(p) && p > 0 ? p : 11434;
     })(),
-    model: "VladimirGav/gemma4-26b-16GB-VRAM:latest",
+    model: "devstral:latest",
     models: [],
     smart_routing: true,
     fast_model: "",
@@ -1984,6 +1986,13 @@ html.light .routing-mode-btn--choice.is-active .routing-mode-btn-sub{color:#1118
 .chips{display:flex;flex-wrap:wrap;gap:.18rem;justify-content:flex-end}
 .chip{display:inline-flex;align-items:center;padding:.08rem .34rem;border-radius:.3rem;font-size:.69rem;font-weight:600;background:var(--chip-bg);border:1px solid var(--chip-border);color:var(--text2);white-space:nowrap}
 .chip.mono{font-family:ui-monospace,'Cascadia Code','Segoe UI Mono',monospace;font-size:.7rem;color:#93c5fd}
+.chip--toggle{cursor:pointer;border:1px solid var(--chip-border);font-family:inherit;letter-spacing:.04em;transition:background .13s,border-color .13s,color .13s,opacity .13s}
+.chip--toggle:hover{filter:brightness(1.12)}
+.chip--toggle:active{transform:scale(.95)}
+.chip--toggle:disabled{opacity:.45;cursor:default;pointer-events:none}
+.chip--toggle.is-on{background:color-mix(in srgb,var(--green) 14%,var(--chip-bg));border-color:color-mix(in srgb,var(--green) 40%,var(--chip-border));color:color-mix(in srgb,var(--green) 85%,var(--text2))}
+.chip-tdot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--text3);opacity:.45;margin-right:3px;flex-shrink:0;vertical-align:middle;transition:background .13s,opacity .13s}
+.chip--toggle.is-on .chip-tdot{background:var(--green);opacity:1}
 .meta-status-row{display:flex;align-items:center;justify-content:flex-end;gap:.5rem;min-width:0;width:100%}
 .last-route-bar{margin-top:0;font-size:.69rem;color:var(--text2);max-width:26rem;text-align:right;line-height:1.2;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
 .last-route-bar .lr-dest{font-weight:700;color:var(--green)}
@@ -2107,13 +2116,7 @@ h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;le
   position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;
   overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important;
 }
-.dash-callout{
-  font-size:12px;line-height:1.55;color:var(--text2);background:color-mix(in srgb,var(--accent) 8%,var(--tile-bg));
-  border:1px solid color-mix(in srgb,var(--accent) 28%,var(--border));border-radius:var(--dash-card-radius);padding:12px 16px;margin:0;max-width:62rem;
-}
-.dash-callout strong{color:var(--text)}
-.dash-callout .inline-code,.params-sub .inline-code{font-family:ui-monospace,Consolas,monospace;font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
-.dash-callout-sub{font-size:11px;opacity:.6;display:block;margin-top:5px}
+.params-sub .inline-code{font-family:ui-monospace,Consolas,monospace;font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
 .dash-card--quality{padding:12px 14px}
 .quality-summary-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0 0 10px}
 @media(max-width:900px){.quality-summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
@@ -2422,7 +2425,13 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:22px 0}
 html.light [data-tip]:hover::after{background:rgba(20,20,20,.93);border-color:rgba(0,0,0,.18)}
 html.light [data-tip]:hover::before{border-top-color:rgba(20,20,20,.93)}
 html.light [data-tip][data-tip-bottom]:hover::before{border-bottom-color:rgba(20,20,20,.93);border-top-color:transparent}
+/* Header tooltips: force downward so they don't clip above the viewport */
+.hdr [data-tip]:hover::after{bottom:auto;top:calc(100% + 8px)}
+.hdr [data-tip]:hover::before{bottom:auto;top:calc(100% + 4px);border-top-color:transparent;border-bottom-color:rgba(8,8,8,.96)}
+html.light .hdr [data-tip]:hover::before{border-bottom-color:rgba(20,20,20,.93);border-top-color:transparent}
 @keyframes tipIn{from{opacity:0;transform:translateX(-50%) translateY(4px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+@keyframes tipInDown{from{opacity:0;transform:translateX(-50%) translateY(-4px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+.hdr [data-tip]:hover::after{animation:tipInDown .12s ease}
 /* tip-icon: a small circled ? shown inline next to labels */
 .tip-icon{
   display:inline-flex;align-items:center;justify-content:center;
@@ -2464,6 +2473,8 @@ html.light .tip-icon:hover{background:rgba(0,0,0,.18);color:#222}
         <span class="chip" id="chip-ollama" data-tip="Ollama local AI server status. Green = healthy, yellow = unreachable.">Ollama</span>
         <span class="chip mono" data-tip="Ollama host:port — where the router sends local model requests. Change via ROUTER_OLLAMA_HOST / ROUTER_OLLAMA_PORT env vars.">${String(cfg.local.host).replace(/[<>&]/g, "")}:${cfg.local.port}</span>
         <span class="chip mono" data-tip="This router is listening here. Your ANTHROPIC_BASE_URL should point to this address so Claude Code routes through the proxy.">${String(cfg.listenHost).replace(/[<>&]/g, "")}:${cfg.port}</span>
+        <button type="button" class="chip chip--toggle${cfg.privacy.project_obfuscation.enabled ? " is-on" : ""}" id="privacy-obfusc-btn" data-tip="Project obfuscation: replaces project filenames and terms with aliases before sending to cloud. Click to toggle." onclick="togglePrivacy('obfuscation','obfusc')"><span class="chip-tdot"></span>OBFUSC</button>
+        <button type="button" class="chip chip--toggle${cfg.privacy.cloud_redaction.enabled ? " is-on" : ""}" id="privacy-redact-btn" data-tip="Cloud redaction: strips paths, emails, secrets and IDs from Anthropic-bound requests. Click to toggle." onclick="togglePrivacy('redaction','redact')"><span class="chip-tdot"></span>REDACT</button>
       </div>
       <div class="meta-status-row">
         <div class="last-route-bar local" id="last-route-bar" title="No recent route yet" data-tip="Last routing decision. LOCAL = request handled by your Ollama model (free). CLOUD = sent to Anthropic API (uses quota). Fallback = auto-switched after error."><span id="last-route-text">Awaiting route</span></div>
@@ -2681,17 +2692,6 @@ html.light .tip-icon:hover{background:rgba(0,0,0,.18);color:#222}
 
 <!-- ══ Main ═════════════════════════════════════════════════════════════════ -->
 <div class="main">
-
-  <div class="dash-callout" role="region" aria-label="Local-first routing">
-    <strong>Local-first, cloud when needed.</strong>
-    Smart routing uses your Ollama pool by default; very large prompts, heavy tool output this turn, or routing keywords go to Claude. <strong>Speed assist model</strong> prefers a smaller tag for brief prompts, and these settings save automatically.
-  </div>
-
-  <div class="dash-callout" role="note" aria-label="Supported clients">
-    <strong>Claude Code CLI and the VS Code plugin route through here.</strong>
-    Run <span class="inline-code">npm run merge-env</span> once, then use either client. Watch the footer for <strong>LOCAL</strong> / <strong>CLOUD</strong> to confirm routing is active.
-    <span class="dash-callout-sub">The separate claude.ai chat app bypasses <span class="inline-code">ANTHROPIC_BASE_URL</span> and cannot be routed through this proxy.</span>
-  </div>
 
   <section class="dash-card dash-card--models-runtime" aria-labelledby="dash-models-h">
     <div class="models-routing-bar" role="group" aria-labelledby="routing-mode-heading">
@@ -4403,12 +4403,31 @@ es.onmessage=function(ev){
 };
 es.onerror=function(){ const el=document.getElementById('rdot'); if(el) el.className='rdot err'; };
 es.onopen=function(){ const el=document.getElementById('rdot'); if(el&&el.classList.contains('err')) el.className='rdot'; };
+function applyPrivacyChip(id,on){
+  var btn=document.getElementById(id);
+  if(!btn)return;
+  btn.classList.toggle('is-on',!!on);
+}
+async function togglePrivacy(type,shortId){
+  var btnId='privacy-'+shortId+'-btn';
+  var btn=document.getElementById(btnId);
+  if(!btn||btn.disabled)return;
+  var newOn=!btn.classList.contains('is-on');
+  btn.disabled=true;
+  try{
+    var r=await routerFetch('/api/privacy/'+type,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({enabled:newOn})});
+    if(r&&r.ok!==false) applyPrivacyChip(btnId,newOn);
+  }catch(_){}
+  btn.disabled=false;
+}
 async function refreshRouteStats(){
   try{
     const r=await fetchWithTimeout('/api/stats',12000);
     if(!r.ok)return;
     const j=await r.json();
     if(j.config&&j.config.routing_mode!=null)applyRoutingModeButton(j.config.routing_mode,j.cloud_quota);
+    if(j.config&&j.config.privacy_project_obfuscation)applyPrivacyChip('privacy-obfusc-btn',j.config.privacy_project_obfuscation.enabled);
+    if(j.config&&j.config.privacy_cloud_redaction)applyPrivacyChip('privacy-redact-btn',j.config.privacy_cloud_redaction.enabled);
     const lr=j.last_route;
     const bar=document.getElementById('last-route-bar');
     const tx=document.getElementById('last-route-text');
@@ -4929,6 +4948,38 @@ const server = http.createServer(async (req, res) => {
       CFG.routing.mode = next;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, mode: next }));
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "invalid body" }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && reqPath === "/api/privacy/obfuscation") {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const body = JSON.parse((await readBody(req)).toString() || "{}");
+      const enabled = !!body.enabled;
+      savePrivacyObfuscationEnabled(routerDir, enabled);
+      CFG.privacy.project_obfuscation.enabled = enabled;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, enabled }));
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "invalid body" }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && reqPath === "/api/privacy/redaction") {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const body = JSON.parse((await readBody(req)).toString() || "{}");
+      const enabled = !!body.enabled;
+      savePrivacyRedactionEnabled(routerDir, enabled);
+      CFG.privacy.cloud_redaction.enabled = enabled;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, enabled }));
     } catch {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "invalid body" }));

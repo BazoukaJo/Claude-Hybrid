@@ -127,7 +127,6 @@ test("dashboard HTML + system-stats + pool routing POST (no admin token)", async
     "btn-open-gen-json",
     "params-files-modal",
     "scheduleSaveParams",
-    "dash-callout",
     "settings-hint-details",
     "info-readonly-note",
     "buymeacoffee.com/bazoukajo",

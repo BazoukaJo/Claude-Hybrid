@@ -59,7 +59,7 @@ After setup and **`merge-env`**, use **`claude`** as usual; **in-router** routin
 | **Preview page** | **`http://127.0.0.1:8082/header-ui`** — compact header / system / log; full controls on `/`.                                                                                                                                                                                                                                                         |
 | **Autostart**    | Optional: `setup.ps1` can install a Startup-folder launcher for Ollama + router.                                                                                                                                                                                                                                                                     |
 
-**Hardware this kit targets:** 16 GB VRAM class GPUs and up. Keep **`VladimirGav/gemma4-26b-16GB-VRAM:latest`** in the pool for stronger local turns, but pair it with smaller coder models so smart routing can avoid VRAM saturation on long-context requests.
+**Hardware this kit targets:** 16 GB VRAM class GPUs and up. Keep **`deepseek-coder-v2:16b`** in the pool for stronger local turns, but pair it with smaller coder models so smart routing can avoid VRAM saturation on long-context requests.
 
 ## Screenshot
 

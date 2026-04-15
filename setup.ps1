@@ -26,8 +26,8 @@ $StartupFolder = [System.Environment]::GetFolderPath('Startup')
 $VbsPath = Join-Path $StartupFolder 'ClaudeHybridRouter.vbs'
 
 $ModelsToPull = @(
-    'VladimirGav/gemma4-26b-16GB-VRAM:latest',
-    'gemma4:e4b'
+    'deepseek-coder-v2:16b',
+    'qwen2.5-coder:7b'
 )
 
 function Write-Step([string]$msg, [string]$color = 'Gray') {

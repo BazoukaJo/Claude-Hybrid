@@ -265,6 +265,30 @@ function saveRoutingMode(routerDir, mode) {
   return normalized;
 }
 
+/** Persist `privacy.project_obfuscation.enabled` into hybrid.config.json. */
+function savePrivacyObfuscationEnabled(routerDir, enabled) {
+  const p = configPath(routerDir);
+  let obj = {};
+  if (fs.existsSync(p)) { try { obj = JSON.parse(fs.readFileSync(p, "utf8")); } catch { obj = {}; } }
+  if (!obj.privacy || typeof obj.privacy !== "object") obj.privacy = {};
+  if (!obj.privacy.project_obfuscation || typeof obj.privacy.project_obfuscation !== "object") obj.privacy.project_obfuscation = {};
+  obj.privacy.project_obfuscation.enabled = !!enabled;
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, `${JSON.stringify(obj, null, 2)}\n`, "utf8");
+}
+
+/** Persist `privacy.cloud_redaction.enabled` into hybrid.config.json. */
+function savePrivacyRedactionEnabled(routerDir, enabled) {
+  const p = configPath(routerDir);
+  let obj = {};
+  if (fs.existsSync(p)) { try { obj = JSON.parse(fs.readFileSync(p, "utf8")); } catch { obj = {}; } }
+  if (!obj.privacy || typeof obj.privacy !== "object") obj.privacy = {};
+  if (!obj.privacy.cloud_redaction || typeof obj.privacy.cloud_redaction !== "object") obj.privacy.cloud_redaction = {};
+  obj.privacy.cloud_redaction.enabled = !!enabled;
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, `${JSON.stringify(obj, null, 2)}\n`, "utf8");
+}
+
 function watchConfig(routerDir, onReload) {
   const p = configPath(routerDir);
   if (!fs.existsSync(p)) return;
@@ -296,6 +320,8 @@ module.exports = {
   saveLocalModel,
   saveLocalRoutingSettings,
   saveRoutingMode,
+  savePrivacyObfuscationEnabled,
+  savePrivacyRedactionEnabled,
   localModelUnsetInConfigFile,
   localFastUnsetInConfigFile,
 };

@@ -76,7 +76,7 @@ function waitHealth(port, timeout = 20000) {
 
     await page.goto(`${base}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForSelector('#local-pool-panel', { timeout: 15000 });
-    await page.waitForSelector('.dash-callout', { timeout: 5000 });
+    await page.waitForSelector('.dash-card--models-runtime', { timeout: 5000 });
 
     // Main dashboard script must parse and run (footer padding, collapse, system-stats poller).
     await page.waitForFunction(

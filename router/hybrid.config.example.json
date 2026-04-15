@@ -11,9 +11,11 @@
     "smart_routing": true,
     "models": [
       "devstral:latest",
+      "gemma4:26b-a4b-it-q4_k_m",
       "qwen3.5:latest",
+      "gemma4:e4b",
       "qwen2.5-coder:7b",
-      "deepseek-coder-v2:16b",
+      "deepseek-coder-v2:16b"
     ],
     "cascadeQuality": true,
     "vram_gb": 16,

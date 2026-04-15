@@ -10,8 +10,8 @@ test('matchPresetPatch: llama3.2 tag beats llama3', () => {
   assert.ok(p.num_ctx >= 8192);
 });
 
-test('matchPresetPatch: registry path uses model segment', () => {
-  const p = matchPresetPatch('vladimirgav/gemma4-26b-16gb-vram:latest');
+test('matchPresetPatch: gemma4 26b tag matches preset', () => {
+  const p = matchPresetPatch('gemma4:26b-a4b-it-q4_k_m');
   assert.ok(Object.keys(p).length > 0);
   assert.strictEqual(typeof p.temperature, 'number');
 });
