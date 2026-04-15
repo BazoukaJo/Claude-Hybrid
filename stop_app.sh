@@ -61,7 +61,7 @@ if [ "${KEEP_ENV}" = "keepenv" ]; then
 fi
 
 echo ""
-echo "Clearing hybrid proxy (Claude settings.json, Cursor/VS Code terminal env)..."
+echo "Clearing hybrid proxy (Claude settings.json, VS Code terminal env)..."
 echo "Claude Code will use cloud until you start the router again (./start_app.sh)."
 
 if ! command -v node &>/dev/null; then

@@ -117,6 +117,8 @@ if not errorlevel 1 (
 )
 
 echo   Ollama service is not running. Starting it in the background...
+if not defined OLLAMA_MAX_LOADED_MODELS set "OLLAMA_MAX_LOADED_MODELS=2"
+echo   Ollama max loaded models: %OLLAMA_MAX_LOADED_MODELS%
 start /B "" ollama serve >nul 2>&1
 echo   Waiting ~4 seconds for service to initialize...
 timeout /t 4 /nobreak >nul

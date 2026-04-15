@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (and similar agents) working in this repository.
 
-> **Read first:** Treat **[Core behavior](#core-behavior-read-first--prioritize-before-debugging)** as the contract for env + router lifecycle. Before concluding “routing is broken,” verify **client type** (Claude Code vs desktop app), whether **`ANTHROPIC_BASE_URL`** still targets this router (vs reverted / cloud), and that **dashboard routing mode** in **`hybrid.config.json`** only applies **after** traffic reaches the proxy. User-facing detail: **`README.md`** § _Core behavior (read this first)_.
+> **Read first:** Treat **[Core behavior](#core-behavior-read-first--prioritize-before-debugging)** as the contract for env + router lifecycle. Before concluding “routing is broken,” verify the client type (**Claude Code CLI** or **VS Code plugin**), whether **`ANTHROPIC_BASE_URL`** still targets this router (vs reverted / cloud), and that **dashboard routing mode** in **`hybrid.config.json`** only applies **after** traffic reaches the proxy. User-facing detail: **`README.md`** § _Core behavior (read this first)_.
 
 ## Core behavior (read first — prioritize before debugging)
 
@@ -13,26 +13,26 @@ Guidance for Claude Code (and similar agents) working in this repository.
 
 ### Lifecycle (keep env aligned with router state)
 
-- **Windows:** **`start_app.bat`** runs **`merge-env`** then starts **`node router/server.js`**. **`stop_app.bat`** stops the process and **by default** runs **`scripts/revert-hybrid-core.bat`** (clear kit proxy from **`~/.claude/settings.json`**, Cursor/VS Code **`terminal.integrated.env.*`**, User **`ANTHROPIC_BASE_URL`**). **`stop_app.bat keepenv`** stops without reverting.
+- **Windows:** **`start_app.bat`** runs **`merge-env`** then starts **`node router/server.js`**. **`stop_app.bat`** stops the process and **by default** runs **`scripts/revert-hybrid-core.bat`** (clear kit proxy from **`~/.claude/settings.json`**, VS Code **`terminal.integrated.env.*`**, User **`ANTHROPIC_BASE_URL`**). **`stop_app.bat keepenv`** stops without reverting.
 - **Linux / macOS:** **`./start_app.sh`** and **`./stop_app.sh`** mirror the Windows bat scripts (`chmod +x *.sh` once). `stop_app.sh` calls `node scripts/revert-claude-hybrid-env.js` (reverts `~/.claude/settings.json` + IDE terminal env). **`./stop_app.sh keepenv`** stops without reverting.
 - **Manual `npm start`:** run **`npm run merge-env`** when enabling the proxy; **`npm run revert-env`** (and User env script if used on Windows) when returning to cloud-only.
 - **Autostart:** Windows — `setup.ps1 -Autostart` / Startup shortcut. macOS — launchd plist wrapping `scripts/watchdog-router.sh`. Linux — crontab `@reboot` or systemd user unit (see `scripts/watchdog-router.sh`).
 
 ### Clients
 
-**Claude Code** (CLI and IDE extensions via Cursor / VS Code): use the proxy when env is merged — all model variants route correctly through the proxy. **Automatic recovery (watchdog):** When `-Autostart` is used, a background health watchdog monitors the router every 30 seconds. If the router crashes, the watchdog auto-restarts it (most recoveries within ~1 min). If restart fails after 3+ attempts, the watchdog silently reverts `ANTHROPIC_BASE_URL` so Claude Code falls back to Anthropic cloud — **zero downtime, zero user intervention**. Check **`~/.claude/watchdog.log`** for recovery events.
+**Claude Code** (CLI and VS Code plugin): use the proxy when env is merged — all model variants route correctly through the proxy. **Automatic recovery (watchdog):** When `-Autostart` is used, a background health watchdog monitors the router every 30 seconds. If the router crashes, the watchdog auto-restarts it (most recoveries within ~1 min). If restart fails after 3+ attempts, the watchdog silently reverts `ANTHROPIC_BASE_URL` so Claude Code falls back to Anthropic cloud — **zero downtime, zero user intervention**. Check **`~/.claude/watchdog.log`** for recovery events.
 
 ## What this project is
 
-A kit that routes **Claude Code** (and other Anthropic-API-compatible clients) between **local Ollama** and **Anthropic’s API** by task shape. After setup, the user runs **`claude`** in a terminal (or uses Cursor/VS Code with the same env); **`ANTHROPIC_BASE_URL`** points at this router when the lifecycle above is applied.
+A kit that routes **Claude Code** (and other Anthropic-API-compatible clients) between **local Ollama** and **Anthropic’s API** by task shape. After setup, the user runs **`claude`** in a terminal (or uses the VS Code plugin with the same env); **`ANTHROPIC_BASE_URL`** points at this router when the lifecycle above is applied.
 
 ## Architecture
 
 ```text
-Claude Code / Cursor / IDE
+Claude Code CLI / VS Code plugin
     |
     | ANTHROPIC_BASE_URL=http://127.0.0.1:8082  (default; or ROUTER_PORT)
-    |   User env + ~/.claude/settings.json + Cursor/VS Code terminal.integrated.env.*
+    |   User env + ~/.claude/settings.json + VS Code terminal.integrated.env.*
     |   setup.ps1 and/or npm run merge-env (scripts/merge-claude-hybrid-env.js)
     v
 router/server.js  (Node proxy; no npm deps for the router itself)
@@ -105,6 +105,7 @@ The redactor currently lives in **`router/lib/privacy-redactor.js`**. `/api/stat
 ## API touches agents often care about
 
 - `GET /api/health`, `/api/model-status`, `/api/ollama-models` (tags include optional `context_max` from `/api/show`), `/api/stats`, `/api/logs`
+- `GET /api/quality-log?limit=50` — recent cloud-quality entries, aggregates, and routing suggestions
 - `GET /events` seeds the current log backlog and then streams new route events
 - `GET/POST /api/router/local-routing-config` — pool (`local.models`), `smart_routing`, `fast_model`
 - `GET/POST /api/router/routing-mode` — current `routing.mode`
@@ -114,13 +115,12 @@ The redactor currently lives in **`router/lib/privacy-redactor.js`**. `/api/stat
 ## Setup commands
 
 ```powershell
-ollama pull VladimirGav/gemma4-26b-16GB-VRAM
-ollama pull gemma4:e4b
+ollama pull qwen2.5-coder:7b
 .\setup.ps1
 # or: .\setup.ps1 -RoutingOnly
 ```
 
-Restart the IDE after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, Cursor/VS Code **`terminal.integrated.env.*`** with **`ANTHROPIC_BASE_URL`** + **`ENABLE_TOOL_SEARCH`**, and aligns User **`ANTHROPIC_BASE_URL`** with **`setup.ps1`**), then **fully quit** the IDE and reopen. On Windows, merge may run **`scripts/notify-environment-windows.ps1`** so User env changes propagate without a full reboot (best-effort).
+Restart VS Code after setup. If the router log stays empty, run **`npm run merge-env`** (updates `~/.claude/settings.json`, VS Code **`terminal.integrated.env.*`** with **`ANTHROPIC_BASE_URL`** + **`ENABLE_TOOL_SEARCH`**, and aligns User **`ANTHROPIC_BASE_URL`** with **`setup.ps1`**), then **fully quit** VS Code and reopen. On Windows, merge may run **`scripts/notify-environment-windows.ps1`** so User env changes propagate without a full reboot (best-effort).
 
 **Local deploy sanity:** **`npm start`** → dashboard **`http://127.0.0.1:8082/`**; **`npm run diagnose`** (Windows) checks port, listener, and settings. **`npm install`** is only required for **`npm test`** / Playwright, not for running the router.
 
@@ -176,4 +176,8 @@ Recent coverage additions include privacy redaction unit tests and a router HTTP
 
 ## Hardware note (this kit’s reference machine)
 
-RTX 4070 Ti Super (16 GB VRAM), 64 GB RAM — default **`VladimirGav/gemma4-26b-16GB-VRAM:latest`** in code. Adjust `local.model` for the user’s GPU / tag.
+RTX 4070 Ti Super (16 GB VRAM), 64 GB RAM.
+
+- Keep `deepseek-coder-v2:16b` in pool for stronger local turns.
+- Prefer at least one small coder fast lane (`qwen2.5-coder:7b`) and one medium coder model (`qwen3.5:latest` or `devstral:latest`) for robust smart routing.
+- `local.vram_gb` should match real hardware so VRAM hard-exclusion and penalties prevent near-limit hangs.

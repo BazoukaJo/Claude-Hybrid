@@ -47,6 +47,15 @@ function applyUserConfig(CFG, user) {
     if (typeof L.cascadeQuality === "boolean") {
       CFG.local.cascadeQuality = L.cascadeQuality;
     }
+    if (Number.isFinite(Number(L.vram_gb))) {
+      CFG.local.vram_gb = Number(L.vram_gb);
+    }
+    if (typeof L.shadow_eval_enabled === "boolean") {
+      CFG.local.shadow_eval_enabled = L.shadow_eval_enabled;
+    }
+    if (typeof L.shadow_eval_model === "string") {
+      CFG.local.shadow_eval_model = L.shadow_eval_model.trim();
+    }
   }
   if (user.routing && typeof user.routing === "object") {
     const r = user.routing;
@@ -132,7 +141,10 @@ function applyUserConfig(CFG, user) {
           CFG.privacy.project_obfuscation[key] = po[key];
       }
       if (typeof po.alias_prefix === "string") {
-        const cleaned = po.alias_prefix.trim().replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+        const cleaned = po.alias_prefix
+          .trim()
+          .replace(/[^A-Za-z0-9]/g, "")
+          .toLowerCase();
         if (cleaned.length >= 1)
           CFG.privacy.project_obfuscation.alias_prefix = cleaned.slice(0, 10);
       }

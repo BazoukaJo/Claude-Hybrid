@@ -5,11 +5,6 @@ Write-Host ''
 Write-Host '  Claude Hybrid - client routing diagnosis' -ForegroundColor Cyan
 Write-Host '  -----------------------------------------' -ForegroundColor DarkGray
 Write-Host ''
-Write-Host '  >>> If you use the Claude DESKTOP APP (standalone Windows/Mac app):' -ForegroundColor Yellow
-Write-Host '      It does NOT use ANTHROPIC_BASE_URL — traffic stays on Anthropic cloud.' -ForegroundColor Yellow
-Write-Host '      This router only sees requests from Claude CODE (terminal: claude),' -ForegroundColor Yellow
-Write-Host '      Cursor/VS Code, or other API clients pointed at the router.' -ForegroundColor Yellow
-Write-Host ''
 
 $routerPort = [System.Environment]::GetEnvironmentVariable('ROUTER_PORT', 'User')
 if (-not $routerPort) { $routerPort = $env:ROUTER_PORT }
@@ -30,7 +25,7 @@ if ($userBase) {
 else { Write-Host '(not set)' -ForegroundColor Red }
 
 Write-Host '  ANTHROPIC_BASE_URL (this session):   ' -NoNewline
-if ($sessBase) { Write-Host $sessBase -ForegroundColor Gray } else { Write-Host '(empty - normal in GUI-launched apps)' -ForegroundColor DarkGray }
+if ($sessBase) { Write-Host $sessBase -ForegroundColor Gray } else { Write-Host '(empty)' -ForegroundColor DarkGray }
 
 $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
 Write-Host '  ~/.claude/settings.json:             ' -NoNewline
@@ -97,23 +92,6 @@ else {
     Write-Host "not found (expected default: $defaultCliPath)" -ForegroundColor Yellow
 }
 
-Write-Host '  Claude desktop install test:         ' -NoNewline
-$desktopCandidates = @(
-    (Join-Path $env:LOCALAPPDATA 'Programs\Claude\Claude.exe'),
-    (Join-Path $env:LOCALAPPDATA 'Programs\Anthropic\Claude\Claude.exe'),
-    (Join-Path $env:LOCALAPPDATA 'Claude\Claude.exe'),
-    (Join-Path ${env:ProgramFiles} 'Claude\Claude.exe'),
-    (Join-Path ${env:ProgramFiles(x86)} 'Claude\Claude.exe')
-) | Where-Object { $_ -and $_.Trim().Length -gt 0 }
-$desktopFound = $desktopCandidates | Where-Object { Test-Path $_ }
-if ($desktopFound.Count -gt 0) {
-    Write-Host "found ($($desktopFound -join '; '))" -ForegroundColor Gray
-}
-else {
-    Write-Host 'not found in common default folders' -ForegroundColor DarkGray
-}
-
-Write-Host ''
 $rh = [System.Environment]::GetEnvironmentVariable('ROUTER_HOST', 'User')
 if (-not $rh) { $rh = $env:ROUTER_HOST }
 Write-Host '  ROUTER_HOST (optional):              ' -NoNewline
@@ -130,11 +108,9 @@ if ($adm) { Write-Host 'set (dashboard: use Admin token field)' -ForegroundColor
 
 Write-Host '  Notes:' -ForegroundColor DarkGray
 Write-Host '    - Claude Code reads env from your shell OR from ~/.claude/settings.json (env key).' -ForegroundColor DarkGray
-Write-Host '    - Apps started from the taskbar (Cursor, VS Code) often ignore User env until you' -ForegroundColor DarkGray
+Write-Host '    - Apps started from the taskbar (VS Code) often ignore User env until you' -ForegroundColor DarkGray
 Write-Host '      sign out/in or add env via settings.json (merge script above).' -ForegroundColor DarkGray
-Write-Host '    - The consumer Claude desktop Windows/Mac app does not use this proxy; use' -ForegroundColor DarkGray
-Write-Host '      Claude Code CLI, Cursor, or other API-compatible clients.' -ForegroundColor DarkGray
-Write-Host '    - Apply routing to Claude + IDE terminals:  npm run merge-env   (or: setup.ps1)' -ForegroundColor DarkGray
+Write-Host '    - Apply routing to Claude + VS Code terminals:  npm run merge-env   (or: setup.ps1)' -ForegroundColor DarkGray
 Write-Host '    - Need proof of real routed traffic? Run: npm run diagnose:strict' -ForegroundColor DarkGray
 Write-Host "    - Quota / pay-as-you-go: README section 'Claude Code: hit your limit'" -ForegroundColor DarkGray
 Write-Host '    - Quota text (e.g. hit your limit for Claude messages) can be from (A) Claude' -ForegroundColor DarkGray

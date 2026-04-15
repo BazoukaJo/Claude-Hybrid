@@ -7,15 +7,18 @@
   },
   "local": {
     "model": "devstral:latest",
-    "fast_model": "qwen3.5:latest",
+    "fast_model": "qwen2.5-coder:7b",
     "smart_routing": true,
-    "models": [],
+    "models": [
+      "devstral:latest",
+      "qwen3.5:latest",
+      "qwen2.5-coder:7b",
+      "deepseek-coder-v2:16b",
+    ],
     "cascadeQuality": true,
-
     "vram_gb": 16,
-
     "shadow_eval_enabled": true,
-    "shadow_eval_model": ""
+    "shadow_eval_model": "qwen3.5:latest"
   },
   "routing": {
     "mode": "hybrid",

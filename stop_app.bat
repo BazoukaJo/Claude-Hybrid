@@ -29,7 +29,7 @@ REM Use: stop_app.bat keepenv  to stop only and leave ANTHROPIC_BASE_URL / setti
 if /I "%~1"=="keepenv" goto :end
 
 echo.
-echo Clearing hybrid proxy ^(Claude settings.json, Cursor/VS Code terminal env, User ANTHROPIC_BASE_URL^)...
+echo Clearing hybrid proxy ^(Claude settings.json, VS Code terminal env, User ANTHROPIC_BASE_URL^)...
 echo Claude Code will use cloud until you start the router again ^(start_app.bat runs merge-env^).
 call "%~dp0scripts\revert-hybrid-core.bat"
 if errorlevel 1 set "STOP_EC=1"

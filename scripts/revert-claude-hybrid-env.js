@@ -2,7 +2,7 @@
 /**
  * Clears kit proxy URL from:
  * - ~/.claude/settings.json (env.ANTHROPIC_BASE_URL)
- * - Cursor / VS Code User settings (terminal.integrated.env.* ANTHROPIC_BASE_URL)
+ * - VS Code User settings (terminal.integrated.env.* ANTHROPIC_BASE_URL)
  *
  * Only removes values that match merge-claude-hybrid-env.js defaults (localhost/127.0.0.1 + ROUTER_PORT).
  * Pair with revert-hybrid-user-env.ps1 (User registry) via revert-hybrid-core.bat.
@@ -36,21 +36,10 @@ function ideUserSettingsPaths() {
   const h = process.env.HOME || process.env.USERPROFILE || "";
   if (process.platform === "win32" && process.env.APPDATA) {
     const ad = process.env.APPDATA;
-    return [
-      path.join(ad, "Cursor", "User", "settings.json"),
-      path.join(ad, "Code", "User", "settings.json"),
-    ];
+    return [path.join(ad, "Code", "User", "settings.json")];
   }
   if (process.platform === "darwin") {
     return [
-      path.join(
-        h,
-        "Library",
-        "Application Support",
-        "Cursor",
-        "User",
-        "settings.json",
-      ),
       path.join(
         h,
         "Library",
@@ -61,10 +50,7 @@ function ideUserSettingsPaths() {
       ),
     ];
   }
-  return [
-    path.join(h, ".config", "Cursor", "User", "settings.json"),
-    path.join(h, ".config", "Code", "User", "settings.json"),
-  ];
+  return [path.join(h, ".config", "Code", "User", "settings.json")];
 }
 
 function notifyWindowsEnvironment() {
@@ -188,7 +174,7 @@ function main() {
   const b = revertIdeTerminalEnv(kits);
   if (a || b) {
     console.log(
-      "Restart Claude Code / Cursor (full quit) after User env is cleared.",
+      "Restart Claude Code / VS Code (full quit) after User env is cleared.",
     );
     notifyWindowsEnvironment();
   } else {

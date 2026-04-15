@@ -125,25 +125,22 @@ if ($settingsJson) {
 }
 
 $vsSettingsPath = Join-Path $env:APPDATA 'Code\User\settings.json'
-$cursorSettingsPath = Join-Path $env:APPDATA 'Cursor\User\settings.json'
 $vsBase = Get-TerminalEnvValue -Settings (Read-JsonFile -Path $vsSettingsPath)
-$cursorBase = Get-TerminalEnvValue -Settings (Read-JsonFile -Path $cursorSettingsPath)
 
 Write-Status -Label 'User env base URL:' -Value ($(if ($userBase) { $userBase } else { '(not set)' })) -Color $(if ($userBase -eq $expectedBase) { 'Green' } else { 'Yellow' })
 Write-Status -Label 'Session env base URL:' -Value ($(if ($sessionBase) { $sessionBase } else { '(not set)' })) -Color $(if ($sessionBase -eq $expectedBase) { 'Green' } else { 'Yellow' })
 Write-Status -Label '~/.claude base URL:' -Value ($(if ($settingsBase) { $settingsBase } else { '(missing)' })) -Color $(if ($settingsBase -eq $expectedBase) { 'Green' } else { 'Yellow' })
 Write-Status -Label 'VS Code terminal env URL:' -Value ($(if ($vsBase) { $vsBase } else { '(missing)' })) -Color $(if ($vsBase -eq $expectedBase) { 'Green' } else { 'Yellow' })
-Write-Status -Label 'Cursor terminal env URL:' -Value ($(if ($cursorBase) { $cursorBase } else { '(missing)' })) -Color $(if ($cursorBase -eq $expectedBase) { 'Green' } else { 'Yellow' })
 
 if ($settingsBase -ne $expectedBase) {
     Write-Status -Label 'Routing precheck:' -Value 'WARN (~/.claude/settings.json not aligned)' -Color 'Yellow'
 }
 
-if ($vsBase -ne $expectedBase -and $cursorBase -ne $expectedBase) {
+if ($vsBase -ne $expectedBase) {
     Write-Status -Label 'Routing precheck:' -Value 'WARN (IDE terminal env not aligned)' -Color 'Yellow'
 }
 
-$alignedSources = @(@($userBase, $sessionBase, $settingsBase, $vsBase, $cursorBase) | Where-Object { $_ -eq $expectedBase })
+$alignedSources = @(@($userBase, $sessionBase, $settingsBase, $vsBase) | Where-Object { $_ -eq $expectedBase })
 if ($alignedSources.Count -eq 0) {
     Write-Status -Label 'Routing precheck:' -Value 'FAILED (no config source points to expected router URL)' -Color 'Red'
     $failed = $true

@@ -17,22 +17,23 @@ This section is the **contract** for how the kit is meant to work. Everything el
 
 **Goal:** When the router is **up**, Claude Code should use **local routing** (via the proxy). When the router is **down**, Claude Code should **not** keep pointing at a dead port — it should use **normal Anthropic cloud** (until you start the router again).
 
-| Action                                | Windows                                                                                                                                                                                                                                                               | Linux / macOS                                                                                                                        |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **Start router + apply proxy**        | **`start_app.bat`** — runs **`npm run merge-env`** then starts **`node router/server.js`**. Sets **`ANTHROPIC_BASE_URL`** in **`~/.claude/settings.json`**, **User** env, and **Cursor/VS Code** `terminal.integrated.env.*` where applicable.                        | **`./start_app.sh`** — same flow (merge env → start router in foreground). Mark executable once: `chmod +x start_app.sh stop_app.sh restart_app.sh` |
-| **Stop router + revert proxy**        | **`stop_app.bat`** — stops the listener, then runs **`scripts/revert-hybrid-core.bat`** (revert **`settings.json`**, IDE terminal env, User **`ANTHROPIC_BASE_URL`**). If a pre-router URL was saved, it is restored; otherwise proxy URL is removed (cloud default). | **`./stop_app.sh`** — kills the router process, then runs `node scripts/revert-claude-hybrid-env.js` (reverts `settings.json` + IDE terminal env). |
-| **Stop router only, keep env**        | **`stop_app.bat keepenv`**                                                                                                                                                                                                                                            | **`./stop_app.sh keepenv`**                                                                                                          |
-| **Restart**                           | **`restart_app.bat`**                                                                                                                                                                                                                                                 | **`./restart_app.sh`**                                                                                                               |
-| **Manual / Ctrl+C after `npm start`** | Run **`npm run merge-env`** when you start routing; run **`npm run revert-env`** and **`scripts\revert-hybrid-user-env.ps1`** (or **`stop_app.bat`**) when you want **cloud-only** again.                                                                             | Run **`npm run merge-env`** when you start routing; run **`npm run revert-env`** (or **`./stop_app.sh`**) when you want cloud-only.  |
+| Action                                | Windows                                                                                                                                                                                                                                                               | Linux / macOS                                                                                                                                       |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Start router + apply proxy**        | **`start_app.bat`** — runs **`npm run merge-env`** then starts **`node router/server.js`**. Sets **`ANTHROPIC_BASE_URL`** in **`~/.claude/settings.json`**, **User** env, and **VS Code** `terminal.integrated.env.*` where applicable.                               | **`./start_app.sh`** — same flow (merge env → start router in foreground). Mark executable once: `chmod +x start_app.sh stop_app.sh restart_app.sh` |
+| **Stop router + revert proxy**        | **`stop_app.bat`** — stops the listener, then runs **`scripts/revert-hybrid-core.bat`** (revert **`settings.json`**, IDE terminal env, User **`ANTHROPIC_BASE_URL`**). If a pre-router URL was saved, it is restored; otherwise proxy URL is removed (cloud default). | **`./stop_app.sh`** — kills the router process, then runs `node scripts/revert-claude-hybrid-env.js` (reverts `settings.json` + IDE terminal env).  |
+| **Stop router only, keep env**        | **`stop_app.bat keepenv`**                                                                                                                                                                                                                                            | **`./stop_app.sh keepenv`**                                                                                                                         |
+| **Restart**                           | **`restart_app.bat`**                                                                                                                                                                                                                                                 | **`./restart_app.sh`**                                                                                                                              |
+| **Manual / Ctrl+C after `npm start`** | Run **`npm run merge-env`** when you start routing; run **`npm run revert-env`** and **`scripts\revert-hybrid-user-env.ps1`** (or **`stop_app.bat`**) when you want **cloud-only** again.                                                                             | Run **`npm run merge-env`** when you start routing; run **`npm run revert-env`** (or **`./stop_app.sh`**) when you want cloud-only.                 |
 
 **Autostart:**
+
 - **Windows** — `setup.ps1 -Autostart` / Startup shortcut: runs **`merge-env`** before spawning the background router so the same rules apply after login. Watchdog: `scripts/watchdog-router.ps1`.
 - **macOS** — create a launchd plist pointing at `scripts/watchdog-router.sh` (see comments inside the file). The watchdog starts the router and monitors it every 30 s.
 - **Linux** — add `@reboot bash /path/to/Claude-Hybrid/scripts/watchdog-router.sh &` to crontab, or write a systemd user service (see `scripts/watchdog-router.sh` header comments).
 
 ### 3. Supported clients
 
-This router works with any client that honors **`ANTHROPIC_BASE_URL`**: **Claude Code** (`claude` CLI), **Cursor**, and **VS Code** with Claude Code. Run **`npm run merge-env`** once so the URL is visible in IDE terminals.
+This router supports **Claude Code** (`claude` CLI) and the **VS Code Claude Code plugin** through **`ANTHROPIC_BASE_URL`**. Run **`npm run merge-env`** once so the URL is visible in VS Code terminals.
 
 ---
 
@@ -58,7 +59,7 @@ After setup and **`merge-env`**, use **`claude`** as usual; **in-router** routin
 | **Preview page** | **`http://127.0.0.1:8082/header-ui`** — compact header / system / log; full controls on `/`.                                                                                                                                                                                                                                                         |
 | **Autostart**    | Optional: `setup.ps1` can install a Startup-folder launcher for Ollama + router.                                                                                                                                                                                                                                                                     |
 
-**Hardware this kit targets:** 16 GB VRAM class GPUs and up; default tag is **`VladimirGav/gemma4-26b-16GB-VRAM:latest`**. Adjust `local.model` if you use a different Ollama name.
+**Hardware this kit targets:** 16 GB VRAM class GPUs and up. Keep **`VladimirGav/gemma4-26b-16GB-VRAM:latest`** in the pool for stronger local turns, but pair it with smaller coder models so smart routing can avoid VRAM saturation on long-context requests.
 
 ## Screenshot
 
@@ -76,12 +77,21 @@ Started app dashboard with a loaded model and visible pool:
 - **Node.js 18+** (`node --version`)
 - **Claude Code** (`npm install -g @anthropic-ai/claude-code`)
 
-### Models (example)
+### Models (recommended on 16 GB VRAM)
 
 ```powershell
-ollama pull VladimirGav/gemma4-26b-16GB-VRAM
-ollama pull gemma4:e4b
+ollama pull devstral:latest
+ollama pull qwen3.5:latest
+ollama pull qwen2.5-coder:7b
+ollama pull deepseek-coder-v2:16b
 ```
+
+Suggested roles:
+
+- **Primary:** `devstral:latest` (agentic coding, strong SWE behavior)
+- **Fast lane:** `qwen2.5-coder:7b` (low-latency edits/follow-ups)
+- **Shadow eval:** `qwen3.5:latest` (quality probe model)
+- **Heavy local coding fallback:** `deepseek-coder-v2:16b`
 
 ### Apply config (env + optional autostart)
 
@@ -95,7 +105,7 @@ Routing-only (skip model pulls):
 .\setup.ps1 -RoutingOnly
 ```
 
-`setup.ps1` sets **User** `ANTHROPIC_BASE_URL` to **`http://127.0.0.1:<PORT>`** (default port **8082**, or **`ROUTER_PORT`**), merges **`~/.claude/settings.json`** (`ANTHROPIC_BASE_URL`, **`ENABLE_TOOL_SEARCH`**, optional API key flow), updates **Cursor/VS Code** terminal env when the merge script runs, seeds the router display timezone from Windows when possible, and can install autostart. It may prompt for **`ANTHROPIC_API_KEY`** when relevant.
+`setup.ps1` sets **User** `ANTHROPIC_BASE_URL` to **`http://127.0.0.1:<PORT>`** (default port **8082**, or **`ROUTER_PORT`**), merges **`~/.claude/settings.json`** (`ANTHROPIC_BASE_URL`, **`ENABLE_TOOL_SEARCH`**, optional API key flow), updates **VS Code** terminal env when the merge script runs, seeds the router display timezone from Windows when possible, and can install autostart. It may prompt for **`ANTHROPIC_API_KEY`** when relevant.
 
 After setup, run **`npm run merge-env`** anytime you change **`ROUTER_PORT`** or want to refresh IDE + Claude settings without re-running the full installer.
 
@@ -175,16 +185,16 @@ On the **host**, point Claude at the proxy (**`http://127.0.0.1:8082`**) — run
 
 ## Daily use
 
-| Goal                        | Command                                                                                                                                                                                             |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Start router                | **Windows:** **`start_app.bat`**. **Linux/macOS:** **`./start_app.sh`** (chmod +x first). **Any OS:** **`npm start`** / **`node router/server.js`** — then **`npm run merge-env`** if proxy URL is not set. |
-| Stop / restart              | **Windows:** **`stop_app.bat`** / **`restart_app.bat`**. **Linux/macOS:** **`./stop_app.sh`** / **`./restart_app.sh`** (`keepenv` arg to skip env revert on either platform).                              |
+| Goal                        | Command                                                                                                                                                                                                               |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Start router                | **Windows:** **`start_app.bat`**. **Linux/macOS:** **`./start_app.sh`** (chmod +x first). **Any OS:** **`npm start`** / **`node router/server.js`** — then **`npm run merge-env`** if proxy URL is not set.           |
+| Stop / restart              | **Windows:** **`stop_app.bat`** / **`restart_app.bat`**. **Linux/macOS:** **`./stop_app.sh`** / **`./restart_app.sh`** (`keepenv` arg to skip env revert on either platform).                                         |
 | Login autostart             | **Windows:** **`install_startup_shortcut.bat`** (Startup folder .lnk). **macOS:** launchd plist → `scripts/watchdog-router.sh`. **Linux:** crontab `@reboot` or systemd user unit (see `scripts/watchdog-router.sh`). |
-| Open dashboard              | Browser: **`http://127.0.0.1:8082/`** (or `localhost`; use **`ROUTER_PORT`** if not 8082)                                                                                                           |
-| Run tests                   | `npm test` · full + UI screenshots: `npm run test:all`                                                                                                                                              |
-| Check IDE / Claude env      | **`npm run diagnose`** (Windows PowerShell: `ANTHROPIC_BASE_URL`, `ROUTER_PORT`, listener, `settings.json`, API key hint)                                                                           |
-| Strict routed-session check | **`npm run diagnose:strict`** (verifies env alignment + sends a live `/v1/messages` probe and confirms a new route log entry)                                                                       |
-| Docker (full stack)         | **`npm run docker:up`** · stop: **`npm run docker:down`** · router-only compose: **`docker compose -f docker-compose.host-ollama.yml up -d --build`**                                               |
+| Open dashboard              | Browser: **`http://127.0.0.1:8082/`** (or `localhost`; use **`ROUTER_PORT`** if not 8082)                                                                                                                             |
+| Run tests                   | `npm test` · full + UI screenshots: `npm run test:all`                                                                                                                                                                |
+| Check IDE / Claude env      | **`npm run diagnose`** (Windows PowerShell: `ANTHROPIC_BASE_URL`, `ROUTER_PORT`, listener, `settings.json`, API key hint)                                                                                             |
+| Strict routed-session check | **`npm run diagnose:strict`** (verifies env alignment + sends a live `/v1/messages` probe and confirms a new route log entry)                                                                                         |
+| Docker (full stack)         | **`npm run docker:up`** · stop: **`npm run docker:down`** · router-only compose: **`docker compose -f docker-compose.host-ollama.yml up -d --build`**                                                                 |
 
 **Pool**, **smart routing**, **speed assist**, and **routing mode** write `hybrid.config.json` automatically when you change them. **Default model** saves on dropdown change. Main **generation sliders** save after you stop dragging (~½ s debounce).
 
@@ -269,6 +279,31 @@ Additional behavior worth knowing:
 - The speed-assist model can take brief prompts when it is configured and the request looks latency-sensitive.
 - Cloud-model selection is preserved on Claude-bound requests.
 
+VRAM safety behavior in smart routing:
+
+- Hard exclusion: models whose weights alone exceed 98% of `local.vram_gb`
+- Soft penalty: estimated VRAM over 90% of `local.vram_gb` is penalized by score
+- This prevents apparent hangs caused by RAM spill when context grows on near-limit models
+
+### Quality feedback loop
+
+Cloud-routed requests are tracked in 3 stages:
+
+- `startCloud`: captures reason/model/token estimate at route decision time
+- `finishCloud`: computes response length/code-block density and marks likely over-escalation
+- `startShadowEval`: async local mini-eval (no user-visible latency)
+
+Use `GET /api/quality-log?limit=50` for recent entries, aggregates, and automatic routing suggestions.
+
+### Two-agent local concurrency
+
+Running two small local models concurrently can make sense for parallel agent sessions, but it is controlled by Ollama, not this router.
+
+- Keep smart routing enabled with at least two small/medium models in `local.models` (for example `qwen2.5-coder:7b` + `qwen3.5:latest`)
+- `start_app.bat` and `start_app.sh` now default `OLLAMA_MAX_LOADED_MODELS=2` when they launch `ollama serve` (you can override by setting your own value)
+- Keep `local.vram_gb` accurate so the picker still avoids unsafe model/context combinations
+- If latency spikes, reduce concurrency or lower per-model `num_ctx`
+
 ---
 
 ## Useful HTTP routes
@@ -284,12 +319,13 @@ Additional behavior worth knowing:
 | `GET /api/model-status`                     | Loaded models, configured default, pooled cards, effective request context                            |
 | `GET /api/ollama-models`                    | Installed tags with `context_max` enrichment and pool snapshot                                        |
 | `GET /api/stats`                            | Counters, last route, cloud quota state, and a non-secret config snapshot including privacy status    |
+| `GET /api/quality-log`                      | Recent cloud-quality entries, aggregates by reason, and auto-generated routing suggestions            |
 | `GET/POST /api/router/local-routing-config` | Read/write `local.models`, `smart_routing`, and `fast_model`                                          |
 | `GET/POST /api/router/routing-mode`         | Read or change `routing.mode`                                                                         |
 | `POST /api/local-model`                     | Set `local.model`                                                                                     |
-| `GET/POST /api/model-params`                | Global generation defaults in `.claude/model-params.json` (repo-local; not `~/.claude/`)             |
+| `GET/POST /api/model-params`                | Global generation defaults in `.claude/model-params.json` (repo-local; not `~/.claude/`)              |
 | `GET /api/model-params-full`                | Built-in vs global vs per-model vs effective view                                                     |
-| `POST /api/model-params-per-model`          | Per-model overrides (`.claude/model-params-per-model.json`, repo-local)                              |
+| `POST /api/model-params-per-model`          | Per-model overrides (`.claude/model-params-per-model.json`, repo-local)                               |
 | `POST /api/router/model/start`              | Load default model into VRAM (API/automation; no dashboard **Start** button — Ollama loads on demand) |
 | `POST /api/router/model/stop`               | Unload the default Ollama model                                                                       |
 | `POST /api/router/model/restart`            | Restart the default Ollama model                                                                      |

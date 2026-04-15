@@ -210,7 +210,7 @@ const PARAM_DEFAULTS = {
   temperature: 0.8,
   top_p: 0.9,
   top_k: 40,
-  num_ctx: 16384,  // raised from 4096 — gives Ollama 16k context by default
+  num_ctx: 16384, // raised from 4096 — gives Ollama 16k context by default
   seed: 0,
   num_predict: -1,
   repeat_penalty: 1.1,
@@ -1294,7 +1294,15 @@ function ollamaUnreachableMayUseCloud() {
   return normalizeRoutingMode(CFG.routing.mode) !== "local";
 }
 
-function proxyCloud(incoming, rawBody, body, res, fallback = false, qlEntry = null, qlStartMs = null) {
+function proxyCloud(
+  incoming,
+  rawBody,
+  body,
+  res,
+  fallback = false,
+  qlEntry = null,
+  qlStartMs = null,
+) {
   const cloudLimitRoute = {
     dest: "local",
     reason: "cloud limit detected, fallback to local",
@@ -1316,7 +1324,10 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false, qlEntry = nu
   let bodyModified = privacy.changed;
   if (projObf) {
     const { body: obfBody, changed } = projObf.obfuscateBody(cloudBody);
-    if (changed) { cloudBody = obfBody; bodyModified = true; }
+    if (changed) {
+      cloudBody = obfBody;
+      bodyModified = true;
+    }
   }
 
   const cloudRawBody = bodyModified
@@ -1450,17 +1461,33 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false, qlEntry = nu
         // Quality logger: record streaming response metrics asynchronously
         if (qlEntry) {
           const ql = getQualityLogger();
-          const sampleText = Buffer.concat(sniffedChunks.slice(0, 20)).toString("utf8");
-          ql.finishCloud(qlEntry, sampleText, qlStartMs ? Date.now() - qlStartMs : null);
+          const sampleText = Buffer.concat(sniffedChunks.slice(0, 20)).toString(
+            "utf8",
+          );
+          ql.finishCloud(
+            qlEntry,
+            sampleText,
+            qlStartMs ? Date.now() - qlStartMs : null,
+          );
           // Shadow evaluation (async, zero latency impact)
-          const lastUser = [...(body.messages || [])].reverse().find((m) => m.role === "user");
+          const lastUser = [...(body.messages || [])]
+            .reverse()
+            .find((m) => m.role === "user");
           let lastUserText = "";
           if (lastUser) {
-            if (typeof lastUser.content === "string") lastUserText = lastUser.content;
-            else for (const b of lastUser.content || []) if (b && b.type === "text") lastUserText += b.text + " ";
+            if (typeof lastUser.content === "string")
+              lastUserText = lastUser.content;
+            else
+              for (const b of lastUser.content || [])
+                if (b && b.type === "text") lastUserText += b.text + " ";
           }
-          ql.startShadowEval(qlEntry, lastUserText, sampleText, _ollamaGenerate,
-            CFG.local.shadow_eval_model || CFG.local.fast_model).catch(() => {});
+          ql.startShadowEval(
+            qlEntry,
+            lastUserText,
+            sampleText,
+            _ollamaGenerate,
+            CFG.local.shadow_eval_model || CFG.local.fast_model,
+          ).catch(() => {});
         }
       });
       upstream.on("error", () => {
@@ -1511,16 +1538,30 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false, qlEntry = nu
       // Quality logger: record non-streaming response metrics
       if (qlEntry && upstream.statusCode < 400) {
         const ql = getQualityLogger();
-        ql.finishCloud(qlEntry, bodyTxt, qlStartMs ? Date.now() - qlStartMs : null);
+        ql.finishCloud(
+          qlEntry,
+          bodyTxt,
+          qlStartMs ? Date.now() - qlStartMs : null,
+        );
         // Shadow evaluation (async, zero latency impact)
-        const lastUser = [...(body.messages || [])].reverse().find((m) => m.role === "user");
+        const lastUser = [...(body.messages || [])]
+          .reverse()
+          .find((m) => m.role === "user");
         let lastUserText = "";
         if (lastUser) {
-          if (typeof lastUser.content === "string") lastUserText = lastUser.content;
-          else for (const b of lastUser.content || []) if (b && b.type === "text") lastUserText += b.text + " ";
+          if (typeof lastUser.content === "string")
+            lastUserText = lastUser.content;
+          else
+            for (const b of lastUser.content || [])
+              if (b && b.type === "text") lastUserText += b.text + " ";
         }
-        ql.startShadowEval(qlEntry, lastUserText, bodyTxt, _ollamaGenerate,
-          CFG.local.shadow_eval_model || CFG.local.fast_model).catch(() => {});
+        ql.startShadowEval(
+          qlEntry,
+          lastUserText,
+          bodyTxt,
+          _ollamaGenerate,
+          CFG.local.shadow_eval_model || CFG.local.fast_model,
+        ).catch(() => {});
       }
     });
   });
@@ -1540,7 +1581,12 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false, qlEntry = nu
 function _ollamaGenerate(modelName, prompt) {
   return new Promise((resolve, reject) => {
     const payload = Buffer.from(
-      JSON.stringify({ model: modelName, prompt, stream: false, options: { num_predict: 8 } }),
+      JSON.stringify({
+        model: modelName,
+        prompt,
+        stream: false,
+        options: { num_predict: 8 },
+      }),
     );
     const req = http.request(
       {
@@ -1548,7 +1594,10 @@ function _ollamaGenerate(modelName, prompt) {
         port: CFG.local.port,
         path: "/api/generate",
         method: "POST",
-        headers: { "content-type": "application/json", "content-length": payload.length },
+        headers: {
+          "content-type": "application/json",
+          "content-length": payload.length,
+        },
       },
       (res) => {
         const chunks = [];
@@ -1557,11 +1606,16 @@ function _ollamaGenerate(modelName, prompt) {
           try {
             const j = JSON.parse(Buffer.concat(chunks).toString());
             resolve(String(j.response || ""));
-          } catch { resolve(""); }
+          } catch {
+            resolve("");
+          }
         });
       },
     );
-    req.setTimeout(8000, () => { req.destroy(); reject(new Error("shadow eval timeout")); });
+    req.setTimeout(8000, () => {
+      req.destroy();
+      reject(new Error("shadow eval timeout"));
+    });
     req.on("error", reject);
     req.write(payload);
     req.end();
@@ -1577,7 +1631,7 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
     try {
       const tagsBody = await ollamaGet("/api/tags");
       const normalizedTags = normalizeOllamaTagList(tagsBody);
-      populateTagSizeCache(normalizedTags);  // keep size_bytes fresh for VRAM estimator
+      populateTagSizeCache(normalizedTags); // keep size_bytes fresh for VRAM estimator
       const tagList = normalizedTags.map((m) => m.name);
       const pool = resolveLocalPool(CFG, tagList);
       if (!pool.length) {
@@ -1603,7 +1657,7 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
           CFG.local.model,
           effCtx,
           CFG.local.fast_model,
-          CFG.local.vram_gb,   // VRAM budget for safety scoring
+          CFG.local.vram_gb, // VRAM budget for safety scoring
         );
         chosen = pick.model;
         pickReason = pick.reason;
@@ -1642,7 +1696,8 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
           return;
         }
         if (streaming) {
-          const useCascade = CFG.local.cascadeQuality && ollamaUnreachableMayUseCloud();
+          const useCascade =
+            CFG.local.cascadeQuality && ollamaUnreachableMayUseCloud();
           if (useCascade) {
             const guard = createStreamGuard(upstream, DEFAULT_ABORT_PHRASES);
             guard.once("abort", ({ phrase }) => {
@@ -1650,7 +1705,9 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
               // Record as a proper fallback so dashboard metrics reflect reality:
               // cascade aborts are cloud requests, not local successes.
               metrics.recordCascadeAbort(chosen);
-              routeTo("cloud", `cascade abort: "${phrase}"`, true, { cloud_model: body.model });
+              routeTo("cloud", `cascade abort: "${phrase}"`, true, {
+                cloud_model: body.model,
+              });
               if (!res.headersSent) {
                 proxyCloud(incoming, rawBody, body, res, false);
               }
@@ -1678,12 +1735,16 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
               const oai = JSON.parse(Buffer.concat(chunks).toString());
               // Cascade quality check for non-streaming responses
               if (CFG.local.cascadeQuality && ollamaUnreachableMayUseCloud()) {
-                const responseText =
-                  oai.choices?.[0]?.message?.content || "";
-                const phrase = checkNonStreamingContent(responseText, DEFAULT_ABORT_PHRASES);
+                const responseText = oai.choices?.[0]?.message?.content || "";
+                const phrase = checkNonStreamingContent(
+                  responseText,
+                  DEFAULT_ABORT_PHRASES,
+                );
                 if (phrase) {
                   metrics.recordCascadeAbort(chosen);
-                  routeTo("cloud", `cascade abort: "${phrase}"`, true, { cloud_model: body.model });
+                  routeTo("cloud", `cascade abort: "${phrase}"`, true, {
+                    cloud_model: body.model,
+                  });
                   return proxyCloud(incoming, rawBody, body, res, false);
                 }
               }
@@ -2053,6 +2114,28 @@ h2.dash-section-title{font-size:10px;font-weight:700;text-transform:uppercase;le
 .dash-callout strong{color:var(--text)}
 .dash-callout .inline-code,.params-sub .inline-code{font-family:ui-monospace,Consolas,monospace;font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
 .dash-callout-sub{font-size:11px;opacity:.6;display:block;margin-top:5px}
+.dash-card--quality{padding:12px 14px}
+.quality-summary-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0 0 10px}
+@media(max-width:900px){.quality-summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:560px){.quality-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.quality-metric{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 9px;min-width:0}
+.quality-metric-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.quality-metric-value{font-size:12px;font-weight:700;color:var(--text);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.quality-metric-value.is-good{color:var(--green)}
+.quality-metric-value.is-warn{color:var(--amber)}
+.quality-list-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 6px}
+.quality-list-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text3)}
+.quality-status-note{font-size:10px;color:var(--text3);margin:0}
+.quality-suggestion-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.quality-suggestion-item{border:1px solid var(--border);background:var(--surface2);border-radius:8px;padding:8px 10px}
+.quality-suggestion-item.over_escalation{border-left:3px solid var(--amber)}
+.quality-suggestion-item.shadow_score_low{border-left:3px solid var(--blue)}
+.quality-suggestion-item-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 4px}
+.quality-type-pill{font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:2px 6px;border-radius:999px;border:1px solid var(--border2);background:var(--chip-bg);color:var(--text2)}
+.quality-reason-pill{font-size:9px;font-weight:600;font-family:ui-monospace,'Cascadia Code','Segoe UI Mono',monospace;padding:2px 6px;border-radius:6px;background:var(--chip-bg);border:1px solid var(--chip-border);color:var(--text2)}
+.quality-suggestion-msg{font-size:11px;line-height:1.45;color:var(--text2);margin:0}
+.quality-suggestion-meta{font-size:9.5px;color:var(--text3);margin:4px 0 0}
+.quality-empty{font-size:11px;color:var(--text3);padding:10px;border:1px dashed var(--border);border-radius:8px;background:var(--surface2)}
 .dash-supporter-footer{
   margin:0;padding:12px 16px;border:1px solid var(--tile-border);background:color-mix(in srgb,var(--tile-bg) 92%,transparent);border-radius:var(--dash-card-radius);
   display:flex;justify-content:center;text-align:center;
@@ -2605,8 +2688,8 @@ html.light .tip-icon:hover{background:rgba(0,0,0,.18);color:#222}
   </div>
 
   <div class="dash-callout" role="note" aria-label="Supported clients">
-    <strong>Claude Code CLI, desktop app, Cursor, and VS Code all route through here.</strong>
-    Run <span class="inline-code">npm run merge-env</span> once, then open any of those — no other configuration needed. Watch the footer for <strong>LOCAL</strong> / <strong>CLOUD</strong> to confirm routing is active.
+    <strong>Claude Code CLI and the VS Code plugin route through here.</strong>
+    Run <span class="inline-code">npm run merge-env</span> once, then use either client. Watch the footer for <strong>LOCAL</strong> / <strong>CLOUD</strong> to confirm routing is active.
     <span class="dash-callout-sub">The separate claude.ai chat app bypasses <span class="inline-code">ANTHROPIC_BASE_URL</span> and cannot be routed through this proxy.</span>
   </div>
 
@@ -2688,6 +2771,24 @@ html.light .tip-icon:hover{background:rgba(0,0,0,.18);color:#222}
       ${paramSlider("frequency_penalty", "Frequency penalty", "Penalise frequent tokens.", 0, 1, 0.05, p.frequency_penalty, "Penalises tokens proportional to how often they appear. Unlike Presence penalty this scales with frequency. Higher = less repetition of common words. 0 = off.")}
     </div>
   </div>
+  </section>
+
+  <section class="dash-card dash-card--quality" id="quality-panel" aria-labelledby="dash-quality-h">
+    <h2 class="dash-section-title" id="dash-quality-h">Quality suggestions</h2>
+    <p class="params-sub">Cloud-routing quality feedback from <span class="inline-code">/api/quality-log</span>. Suggestions appear after enough samples per reason.</p>
+    <div class="quality-summary-grid" aria-label="Quality summary">
+      <div class="quality-metric"><span class="quality-metric-label">Shadow eval</span><span class="quality-metric-value" id="quality-shadow-state">—</span></div>
+      <div class="quality-metric"><span class="quality-metric-label">Eval model</span><span class="quality-metric-value" id="quality-shadow-model">—</span></div>
+      <div class="quality-metric"><span class="quality-metric-label">Cloud samples</span><span class="quality-metric-value" id="quality-cloud-total">0</span></div>
+      <div class="quality-metric"><span class="quality-metric-label">Could stay local</span><span class="quality-metric-value" id="quality-local-rate">0%</span></div>
+      <div class="quality-metric"><span class="quality-metric-label">Avg shadow score</span><span class="quality-metric-value" id="quality-shadow-avg">—</span></div>
+    </div>
+    <div class="quality-list-head">
+      <span class="quality-list-title">Active suggestions</span>
+      <span class="quality-status-note" id="quality-status-note">Waiting for data…</span>
+    </div>
+    <ul class="quality-suggestion-list" id="quality-suggestion-list" aria-live="polite"></ul>
+    <div class="quality-empty" id="quality-empty">No suggestions yet. Collect at least 6 cloud samples for a routing reason.</div>
   </section>
 
   <footer class="dash-supporter-footer" role="contentinfo" aria-label="Support">
@@ -4332,11 +4433,101 @@ async function refreshRouteStats(){
   }catch{}
 }
 
+function qualityFmtPct(v){
+  var n=Number(v);
+  return Number.isFinite(n)?(Math.round(n*100)+'%'):'—';
+}
+function qualityFmtNum(v,digits){
+  var n=Number(v);
+  return Number.isFinite(n)?n.toFixed(digits):'—';
+}
+function qualitySetText(id,val){
+  var el=document.getElementById(id);
+  if(el) el.textContent=val;
+}
+function qualityTone(el,rate){
+  if(!el)return;
+  el.classList.remove('is-good','is-warn');
+  var n=Number(rate);
+  if(!Number.isFinite(n))return;
+  if(n>=0.55) el.classList.add('is-warn');
+  else if(n<=0.2) el.classList.add('is-good');
+}
+function renderQualitySuggestions(payload){
+  var stats=payload&&payload.stats&&typeof payload.stats==='object'?payload.stats:{};
+  var suggestions=Array.isArray(stats.suggestions)?stats.suggestions:[];
+  var list=document.getElementById('quality-suggestion-list');
+  var empty=document.getElementById('quality-empty');
+  var note=document.getElementById('quality-status-note');
+  qualitySetText('quality-shadow-state',payload&&payload.shadow_eval_enabled?'Enabled':'Disabled');
+  qualitySetText('quality-shadow-model',payload&&payload.shadow_eval_model?String(payload.shadow_eval_model):'—');
+  qualitySetText('quality-cloud-total',String(Number(stats.total_cloud)||0));
+  qualitySetText('quality-local-rate',qualityFmtPct(stats.could_have_been_local_rate));
+  qualitySetText('quality-shadow-avg',stats.avg_shadow_score==null?'—':qualityFmtNum(stats.avg_shadow_score,1)+'/10');
+  qualityTone(document.getElementById('quality-local-rate'),stats.could_have_been_local_rate);
+
+  if(!list||!empty)return;
+  list.innerHTML='';
+  if(!suggestions.length){
+    empty.style.display='block';
+    if(note) note.textContent='No suggestion threshold reached yet';
+    return;
+  }
+  empty.style.display='none';
+  if(note) note.textContent='Showing top '+Math.min(3,suggestions.length)+' suggestion'+(suggestions.length===1?'':'s');
+
+  suggestions.slice(0,3).forEach(function(s){
+    var li=document.createElement('li');
+    var t=String(s&&s.type||'').trim();
+    li.className='quality-suggestion-item'+(t?(' '+t):'');
+
+    var title=document.createElement('div');
+    title.className='quality-suggestion-item-title';
+
+    var type=document.createElement('span');
+    type.className='quality-type-pill';
+    type.textContent=t==='over_escalation'?'Over-escalation':(t==='shadow_score_low'?'Low shadow score':'Suggestion');
+    title.appendChild(type);
+
+    var reason=document.createElement('span');
+    reason.className='quality-reason-pill';
+    reason.textContent='reason: '+String(s&&s.reason||'unknown');
+    title.appendChild(reason);
+
+    var msg=document.createElement('p');
+    msg.className='quality-suggestion-msg';
+    msg.textContent=String(s&&s.message||'');
+
+    var meta=document.createElement('p');
+    meta.className='quality-suggestion-meta';
+    var sc=Number(s&&s.sample_count);
+    var pieces=[];
+    if(Number.isFinite(sc)&&sc>0) pieces.push('samples: '+sc);
+    if(s&&s.could_local_rate!=null) pieces.push('local-rate: '+qualityFmtPct(s.could_local_rate));
+    if(s&&s.avg_shadow_score!=null) pieces.push('avg-score: '+qualityFmtNum(s.avg_shadow_score,1)+'/10');
+    meta.textContent=pieces.join(' · ');
+
+    li.appendChild(title);
+    li.appendChild(msg);
+    if(meta.textContent) li.appendChild(meta);
+    list.appendChild(li);
+  });
+}
+
+async function refreshQualitySuggestions(){
+  try{
+    const r=await fetchWithTimeout('/api/quality-log?limit=25',12000);
+    if(!r.ok)return;
+    const j=await r.json();
+    renderQualitySuggestions(j||{});
+  }catch{}
+}
+
 var DASH_REFRESH_BUDGET_MS=52000;
 async function doRefresh(syncGenerationSliders){
   const run=async function(){
     if(syncGenerationSliders) void refreshStats();
-    await Promise.allSettled([refreshHealth(), refreshRouteStats()]);
+    await Promise.allSettled([refreshHealth(), refreshRouteStats(), refreshQualitySuggestions()]);
     await Promise.allSettled([refreshModel(), refreshOllamaModelList()]);
     if(syncGenerationSliders) await syncGenerationSlidersFromServer();
   };
@@ -4632,14 +4823,25 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && reqPath === "/api/quality-log") {
     const ql = getQualityLogger();
-    const limit = Math.min(200, Math.max(1, parseInt(new URL(req.url, "http://x").searchParams.get("limit") || "50", 10)));
+    const limit = Math.min(
+      200,
+      Math.max(
+        1,
+        parseInt(
+          new URL(req.url, "http://x").searchParams.get("limit") || "50",
+          10,
+        ),
+      ),
+    );
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      entries: ql.getRecentEntries(limit),
-      stats: ql.getStats(),
-      shadow_eval_enabled: ql.shadowEvalEnabled,
-      shadow_eval_model: ql.shadowEvalModel,
-    }));
+    res.end(
+      JSON.stringify({
+        entries: ql.getRecentEntries(limit),
+        stats: ql.getStats(),
+        shadow_eval_enabled: ql.shadowEvalEnabled,
+        shadow_eval_model: ql.shadowEvalModel,
+      }),
+    );
     return;
   }
 
@@ -4682,7 +4884,8 @@ const server = http.createServer(async (req, res) => {
               .auto_detect_filenames,
             auto_detect_identifiers: !!(CFG.privacy.project_obfuscation || {})
               .auto_detect_identifiers,
-            alias_prefix: (CFG.privacy.project_obfuscation || {}).alias_prefix || "proj",
+            alias_prefix:
+              (CFG.privacy.project_obfuscation || {}).alias_prefix || "proj",
             project_terms_count: Array.isArray(
               (CFG.privacy.project_obfuscation || {}).project_terms,
             )
@@ -4692,7 +4895,8 @@ const server = http.createServer(async (req, res) => {
           cascade_quality: !!CFG.local.cascadeQuality,
           always_local_terms_count: (CFG.routing.alwaysLocalTerms || []).length,
           force_local_if_privacy_terms: !!CFG.routing.forceLocalIfPrivacyTerms,
-          privacy_custom_terms_count: (CFG.routing.privacyCustomTerms || []).length,
+          privacy_custom_terms_count: (CFG.routing.privacyCustomTerms || [])
+            .length,
         },
       }),
     );
@@ -5343,9 +5547,7 @@ const server = http.createServer(async (req, res) => {
     const ql = getQualityLogger();
     const qlEntry = ql.startCloud({
       reason: routeResult.reason,
-      estTokens: Math.ceil(
-        (JSON.stringify(body.messages || "")).length / 4
-      ),
+      estTokens: Math.ceil(JSON.stringify(body.messages || "").length / 4),
       model: body.model || "",
     });
     const qlStart = Date.now();
@@ -5456,7 +5658,9 @@ async function startListening() {
   getQualityLogger({
     logPath: process.env.ROUTER_QUALITY_LOG_PATH || null,
     shadowEvalEnabled: !!CFG.local.shadow_eval_enabled,
-    shadowEvalModel: String(CFG.local.shadow_eval_model || CFG.local.fast_model || ""),
+    shadowEvalModel: String(
+      CFG.local.shadow_eval_model || CFG.local.fast_model || "",
+    ),
   });
 
   await validateLocalModelAgainstOllama();

@@ -95,6 +95,9 @@ _ollama_running() {
 
 if ! _ollama_running; then
   _banner "Ollama service is not running. Starting it in the background..."
+  # Allow two resident models by default for parallel small-model agent sessions.
+  export OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-2}"
+  _ok "Ollama max loaded models: ${OLLAMA_MAX_LOADED_MODELS}"
   # Start ollama serve detached; redirect output to avoid blocking the terminal
   nohup ollama serve &>/dev/null &
   OLLAMA_SERVE_PID=$!

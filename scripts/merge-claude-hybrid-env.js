@@ -2,8 +2,7 @@
 /**
  * Merges hybrid routing into:
  * - ~/.claude/settings.json (env.ANTHROPIC_BASE_URL) — Claude Code reads this even when GUI apps ignore User env
- *   (the standalone Claude desktop Windows/Mac app does NOT route chat through this URL; use the `claude` CLI or IDE integration)
- * - Cursor / VS Code User settings (terminal.integrated.env.*) — integrated terminal + many extensions inherit this
+ * - VS Code User settings (terminal.integrated.env.*) — integrated terminal + extensions inherit this
  *
  * Windows: start_app.bat runs this before starting the router; stop_app.bat runs revert-hybrid-core.bat after stop
  * so ANTHROPIC_BASE_URL is cleared while the router is down (Claude uses cloud). setup.ps1 -Autostart runs this
@@ -138,21 +137,10 @@ function ideUserSettingsPaths() {
   const h = process.env.HOME || process.env.USERPROFILE || "";
   if (process.platform === "win32" && process.env.APPDATA) {
     const ad = process.env.APPDATA;
-    return [
-      path.join(ad, "Cursor", "User", "settings.json"),
-      path.join(ad, "Code", "User", "settings.json"),
-    ];
+    return [path.join(ad, "Code", "User", "settings.json")];
   }
   if (process.platform === "darwin") {
     return [
-      path.join(
-        h,
-        "Library",
-        "Application Support",
-        "Cursor",
-        "User",
-        "settings.json",
-      ),
       path.join(
         h,
         "Library",
@@ -163,10 +151,7 @@ function ideUserSettingsPaths() {
       ),
     ];
   }
-  return [
-    path.join(h, ".config", "Cursor", "User", "settings.json"),
-    path.join(h, ".config", "Code", "User", "settings.json"),
-  ];
+  return [path.join(h, ".config", "Code", "User", "settings.json")];
 }
 
 function tryParseSettingsJson(raw) {
@@ -237,7 +222,7 @@ function mergeIdeTerminalEnv(baseUrl) {
   }
   if (!anyChanged && ideUserSettingsPaths().every((f) => fs.existsSync(f))) {
     console.log(
-      "Cursor/VS Code terminal env already has hybrid URL + ENABLE_TOOL_SEARCH (or files skipped).",
+      "VS Code terminal env already has hybrid URL + ENABLE_TOOL_SEARCH (or file skipped).",
     );
   }
   return anyChanged;
@@ -324,7 +309,7 @@ function main() {
   if (a || b || c) {
     console.log("");
     console.log(
-      "Restart Cursor / VS Code (full quit) so editor UI picks up settings.json changes.",
+      "Restart VS Code (full quit) so editor UI picks up settings.json changes.",
     );
     console.log(
       "New integrated terminals should already see ANTHROPIC_BASE_URL.",
