@@ -6,11 +6,16 @@
     "time_zone": "America/Toronto"
   },
   "local": {
-    "model": "VladimirGav/gemma4-26b-16GB-VRAM:latest",
-    "fast_model": "gemma4:e4b",
+    "model": "devstral:latest",
+    "fast_model": "qwen3.5:latest",
     "smart_routing": true,
     "models": [],
-    "cascadeQuality": true
+    "cascadeQuality": true,
+
+    "vram_gb": 16,
+
+    "shadow_eval_enabled": true,
+    "shadow_eval_model": ""
   },
   "routing": {
     "mode": "hybrid",

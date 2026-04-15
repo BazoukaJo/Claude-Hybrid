@@ -182,6 +182,38 @@ function nameSuggestsCoder(name) {
   );
 }
 
+/**
+ * Agentic coding models — purpose-built for multi-file edits, tool calls, and
+ * long-horizon tasks (SWE-bench style).  Gets an extra boost on top of the coder
+ * bonus when tools or tool results are in play (the primary Claude Code shape).
+ */
+function nameSuggestsAgentic(name) {
+  return /devstral|codestral|qwen.*coder|deepseek.*coder/i.test(String(name || ''));
+}
+
+/**
+ * Estimate total GPU VRAM needed to run a model at a given context length.
+ *
+ * Formula (conservative, accounts for GQA / SWA in modern models):
+ *   weights_gb  = size_bytes / 1e9
+ *   kv_cache_gb = context_tokens × 0.00006   (≈0.5 GB per 8 K tokens for ~20 B GQA)
+ *   runtime_gb  = 0.7  (Ollama buffers + activation memory + OS overhead)
+ *
+ * Use the result to penalise models that exceed the available VRAM budget,
+ * preventing OOM hangs (e.g. Gemma4 26B on 16 GB at 16 K context).
+ *
+ * @param {number|null} sizeBytes    Model file size in bytes (from Ollama /api/tags)
+ * @param {number}      contextTokens  Estimated tokens for this request
+ * @returns {number} Estimated VRAM in GB (0 when sizeBytes unknown)
+ */
+function estimateVramGb(sizeBytes, contextTokens) {
+  if (!sizeBytes || !Number.isFinite(sizeBytes) || sizeBytes <= 0) return 0;
+  const weightsGb = sizeBytes / 1e9;
+  const kvCacheGb = Math.max(0, Number(contextTokens) || 0) * 0.00006;
+  const runtimeGb = 0.7;
+  return weightsGb + kvCacheGb + runtimeGb;
+}
+
 /** Tags often used for reasoning / thinking variants (complements Ollama capability flags). */
 function nameSuggestsReasoning(name) {
   return /\b(r1\b|qwq|deepseek-r1|reasoning|think|thinking|-think|magistral|nemotron|gpt-oss|olmo|exaone)/i.test(
@@ -196,18 +228,23 @@ function toolCapableProfile(p) {
 
 /**
  * @param {Array<object>} profiles - from buildModelProfile on server
+ *   Each profile may optionally include:
+ *     size_bytes {number|null}  — from Ollama /api/tags; used for VRAM safety estimation
  * @param {ReturnType<typeof analyzeLocalTask>} task
  * @param {string} defaultModel
  * @param {number} effectiveNumCtx - num_ctx after global + per-model overrides for default (hint)
  * @param {string} [fastModelOpt] - optional small model name (hybrid.config `local.fast_model`) boosted on speed-priority tasks
+ * @param {number} [availableVramGb] - GPU VRAM in GB (e.g. 16); 0/null = skip VRAM safety check
  */
-function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastModelOpt) {
+function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastModelOpt, availableVramGb) {
   const norm = (s) => String(s || '').trim().toLowerCase();
   const fastNorm = norm(fastModelOpt);
   const minCtx = Math.min(
     131072,
     Math.max(2048, Math.ceil(task.estTokens * 2.2), Number(effectiveNumCtx) || 4096),
   );
+  // VRAM safety: available VRAM budget (0 = disabled)
+  const vramBudgetGb = Number(availableVramGb) > 0 ? Number(availableVramGb) : 0;
 
   const toolsInSchema =
     task.toolsInSchema !== undefined && task.toolsInSchema !== null
@@ -227,6 +264,8 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
     if (p.context_max != null && Number.isFinite(p.context_max) && p.context_max < minCtx) return false;
     if (needsVision && p.has_vision === false && !nameSuggestsVision(p.name)) return false;
     if (toolsInSchema && !toolCapableProfile(p)) return false;
+    // VRAM safety hard-exclude: if weights alone exceed 98% of budget (no KV cache room at all)
+    if (vramBudgetGb > 0 && p.size_bytes && p.size_bytes / 1e9 > vramBudgetGb * 0.98) return false;
     return true;
   });
   const pool = viable.length ? viable : profiles;
@@ -246,10 +285,25 @@ function pickBestLocalModel(profiles, task, defaultModel, effectiveNumCtx, fastM
       s += Math.min(6, (ctxMax - minCtx) / 16384);
     }
 
+    // ── VRAM safety penalty ────────────────────────────────────────────────────
+    // Models that push total VRAM (weights + KV cache + runtime) close to the
+    // GPU limit risk OOM hangs (e.g. Gemma4 26B on 16 GB at 16 K context).
+    // Penalise proportionally; prefer models with safe headroom.
+    if (vramBudgetGb > 0 && p.size_bytes && p.size_bytes > 0) {
+      const estVram = estimateVramGb(p.size_bytes, task.estTokens);
+      const safeLimit = vramBudgetGb * 0.90;
+      if (estVram > safeLimit) {
+        // Soft penalty: −8 per GB over the safe limit (still selectable if nothing else fits)
+        s -= Math.min(30, (estVram - safeLimit) * 8);
+      }
+    }
+
     let toolShapeBonus = 0;
     if (toolsInSchema && toolCap) toolShapeBonus += 3;
     if (activeToolPayload && toolCap) toolShapeBonus += 8 + Math.min(10, toolResultsThisTurn * 1.2);
     if (coderBoostWeight && nameSuggestsCoder(p.name)) s += 5 + (activeToolPayload ? 4 : 0);
+    // Agentic-coding models (Devstral, Qwen-Coder…) get extra boost when tools are in play
+    if ((toolsInSchema || activeToolPayload) && nameSuggestsAgentic(p.name)) s += 8;
 
     if (prefersHeavy) {
       s += pb * 4;
@@ -319,4 +373,6 @@ module.exports = {
   nameSuggestsVision,
   nameSuggestsCoder,
   nameSuggestsReasoning,
+  nameSuggestsAgentic,
+  estimateVramGb,
 };

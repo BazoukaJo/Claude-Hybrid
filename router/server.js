@@ -41,6 +41,7 @@ const {
   analyzeLocalTask,
   pickBestLocalModel,
   parseParameterBillions,
+  estimateVramGb,
 } = require("./lib/local-model-picker");
 const { requireAdmin, getAdminToken } = require("./lib/admin-auth");
 const { matchPresetPatch } = require("./lib/ollama-model-presets");
@@ -72,6 +73,7 @@ const {
   localResolvedTimeZone,
   formatClockTime,
 } = require("./lib/time-format");
+const { getQualityLogger } = require("./lib/quality-logger");
 
 function normalizeCloudProtocol(input) {
   const v = String(input || "")
@@ -949,7 +951,24 @@ function contextAllocatedFromPsRow(row) {
 const PROFILE_CACHE_TTL_MS = 6 * 60 * 1000;
 let profileCache = { waveAt: 0, map: new Map() };
 
+/**
+ * Cache: model name → size in bytes (from Ollama /api/tags).
+ * Populated by populateTagSizeCache(); used in buildModelProfile so the
+ * VRAM estimator in pickBestLocalModel has accurate weight sizes.
+ */
+const tagSizeCache = new Map();
+
+function populateTagSizeCache(tagList) {
+  if (!Array.isArray(tagList)) return;
+  for (const m of tagList) {
+    if (m && m.name && typeof m.size === "number" && m.size > 0) {
+      tagSizeCache.set(String(m.name).trim(), m.size);
+    }
+  }
+}
+
 function buildModelProfile(name, show) {
+  const sizeBytes = tagSizeCache.get(String(name || "").trim()) ?? null;
   if (!show || typeof show !== "object" || show.error) {
     return {
       name,
@@ -959,6 +978,7 @@ function buildModelProfile(name, show) {
       has_reasoning: null,
       param_billions: null,
       family: null,
+      size_bytes: sizeBytes,
     };
   }
   const caps = capabilityFlagsFromShow(show);
@@ -972,6 +992,7 @@ function buildModelProfile(name, show) {
     has_reasoning: caps.has_reasoning,
     param_billions: parseParameterBillions(d.parameter_size),
     family: d.family || null,
+    size_bytes: sizeBytes,
   };
 }
 
@@ -1273,7 +1294,7 @@ function ollamaUnreachableMayUseCloud() {
   return normalizeRoutingMode(CFG.routing.mode) !== "local";
 }
 
-function proxyCloud(incoming, rawBody, body, res, fallback = false) {
+function proxyCloud(incoming, rawBody, body, res, fallback = false, qlEntry = null, qlStartMs = null) {
   const cloudLimitRoute = {
     dest: "local",
     reason: "cloud limit detected, fallback to local",
@@ -1426,6 +1447,21 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
           if (tail.length) res.write(tail);
         }
         res.end();
+        // Quality logger: record streaming response metrics asynchronously
+        if (qlEntry) {
+          const ql = getQualityLogger();
+          const sampleText = Buffer.concat(sniffedChunks.slice(0, 20)).toString("utf8");
+          ql.finishCloud(qlEntry, sampleText, qlStartMs ? Date.now() - qlStartMs : null);
+          // Shadow evaluation (async, zero latency impact)
+          const lastUser = [...(body.messages || [])].reverse().find((m) => m.role === "user");
+          let lastUserText = "";
+          if (lastUser) {
+            if (typeof lastUser.content === "string") lastUserText = lastUser.content;
+            else for (const b of lastUser.content || []) if (b && b.type === "text") lastUserText += b.text + " ";
+          }
+          ql.startShadowEval(qlEntry, lastUserText, sampleText, _ollamaGenerate,
+            CFG.local.shadow_eval_model || CFG.local.fast_model).catch(() => {});
+        }
       });
       upstream.on("error", () => {
         if (redirected) return;
@@ -1472,6 +1508,20 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
         "Content-Type": "application/json",
       });
       res.end(finalBuf);
+      // Quality logger: record non-streaming response metrics
+      if (qlEntry && upstream.statusCode < 400) {
+        const ql = getQualityLogger();
+        ql.finishCloud(qlEntry, bodyTxt, qlStartMs ? Date.now() - qlStartMs : null);
+        // Shadow evaluation (async, zero latency impact)
+        const lastUser = [...(body.messages || [])].reverse().find((m) => m.role === "user");
+        let lastUserText = "";
+        if (lastUser) {
+          if (typeof lastUser.content === "string") lastUserText = lastUser.content;
+          else for (const b of lastUser.content || []) if (b && b.type === "text") lastUserText += b.text + " ";
+        }
+        ql.startShadowEval(qlEntry, lastUserText, bodyTxt, _ollamaGenerate,
+          CFG.local.shadow_eval_model || CFG.local.fast_model).catch(() => {});
+      }
     });
   });
   req.on("error", () => {
@@ -1482,6 +1532,42 @@ function proxyCloud(incoming, rawBody, body, res, fallback = false) {
   req.write(cloudRawBody);
   req.end();
 }
+/**
+ * Lightweight Ollama /api/generate call for shadow evaluation.
+ * Uses the fast model to rate cloud response quality (returns raw response text).
+ * Non-streaming, short timeout (8 s) — failure is silently ignored.
+ */
+function _ollamaGenerate(modelName, prompt) {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(
+      JSON.stringify({ model: modelName, prompt, stream: false, options: { num_predict: 8 } }),
+    );
+    const req = http.request(
+      {
+        hostname: CFG.local.host,
+        port: CFG.local.port,
+        path: "/api/generate",
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": payload.length },
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          try {
+            const j = JSON.parse(Buffer.concat(chunks).toString());
+            resolve(String(j.response || ""));
+          } catch { resolve(""); }
+        });
+      },
+    );
+    req.setTimeout(8000, () => { req.destroy(); reject(new Error("shadow eval timeout")); });
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
 function proxyLocal(incoming, body, res, rawBody, routeSummary) {
   const streaming = !!body.stream;
   const anthropicModel = body.model || "unknown";
@@ -1490,7 +1576,9 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
     let pickReason = "default model";
     try {
       const tagsBody = await ollamaGet("/api/tags");
-      const tagList = normalizeOllamaTagList(tagsBody).map((m) => m.name);
+      const normalizedTags = normalizeOllamaTagList(tagsBody);
+      populateTagSizeCache(normalizedTags);  // keep size_bytes fresh for VRAM estimator
+      const tagList = normalizedTags.map((m) => m.name);
       const pool = resolveLocalPool(CFG, tagList);
       if (!pool.length) {
         chosen = CFG.local.model;
@@ -1515,6 +1603,7 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
           CFG.local.model,
           effCtx,
           CFG.local.fast_model,
+          CFG.local.vram_gb,   // VRAM budget for safety scoring
         );
         chosen = pick.model;
         pickReason = pick.reason;
@@ -4541,6 +4630,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "GET" && reqPath === "/api/quality-log") {
+    const ql = getQualityLogger();
+    const limit = Math.min(200, Math.max(1, parseInt(new URL(req.url, "http://x").searchParams.get("limit") || "50", 10)));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      entries: ql.getRecentEntries(limit),
+      stats: ql.getStats(),
+      shadow_eval_enabled: ql.shadowEvalEnabled,
+      shadow_eval_model: ql.shadowEvalModel,
+    }));
+    return;
+  }
+
   if (req.method === "GET" && reqPath === "/api/stats") {
     const counters = metrics.snapshot();
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -5237,7 +5339,17 @@ const server = http.createServer(async (req, res) => {
   }
   if (routeResult.dest === "cloud") {
     routeTo("cloud", routeResult.reason, false, { cloud_model: body.model });
-    proxyCloud(req, rawBody, body, res);
+    // Quality logger: record cloud routing decision; finish after response completes.
+    const ql = getQualityLogger();
+    const qlEntry = ql.startCloud({
+      reason: routeResult.reason,
+      estTokens: Math.ceil(
+        (JSON.stringify(body.messages || "")).length / 4
+      ),
+      model: body.model || "",
+    });
+    const qlStart = Date.now();
+    proxyCloud(req, rawBody, body, res, false, qlEntry, qlStart);
   } else {
     proxyLocal(req, body, res, rawBody, routeResult);
   }
@@ -5340,6 +5452,13 @@ async function startListening() {
   if (!cfgExistedBefore && fs.existsSync(configPath(routerDir))) {
     watchConfig(routerDir, onConfigReload);
   }
+  // Initialise quality logger singleton with config from hybrid.config.json
+  getQualityLogger({
+    logPath: process.env.ROUTER_QUALITY_LOG_PATH || null,
+    shadowEvalEnabled: !!CFG.local.shadow_eval_enabled,
+    shadowEvalModel: String(CFG.local.shadow_eval_model || CFG.local.fast_model || ""),
+  });
+
   await validateLocalModelAgainstOllama();
   server.listen(CFG.port, CFG.listenHost, () => {
     console.log("");
