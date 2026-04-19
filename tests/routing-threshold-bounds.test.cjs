@@ -63,6 +63,45 @@ test('analyzeMessages uses clamped thresholds (tiny configured gate still floors
   );
 });
 
+// ── Saturation-guard threshold (effectiveNumCtx > 32768) ─────────────────────
+
+test('saturation guard: default 16K ctx stays local even above 82%', () => {
+  // 16384 is the default num_ctx. At 82% that fires at ~13 435 tokens, which is
+  // within a normal Claude Code session — the guard must NOT fire here.
+  const cfg = { tokenThreshold: 500_000, fileReadThreshold: 10, keywords: [], effectiveNumCtx: 16384 };
+  // ~55 000 chars → ~13 750 tokens → ~84% of 16 384 but ctx ≤ 32 768 → local
+  const body = { messages: [{ role: 'user', content: 'x'.repeat(55_000) }] };
+  const r = analyzeMessages(body, cfg);
+  assert.strictEqual(r.dest, 'local', `expected local, got cloud: ${r.reason}`);
+});
+
+test('saturation guard: exact 32768 boundary stays local', () => {
+  // Condition is strictly >, so 32768 itself must NOT trigger.
+  const cfg = { tokenThreshold: 500_000, fileReadThreshold: 10, keywords: [], effectiveNumCtx: 32768 };
+  // ~110 000 chars → ~27 500 tokens → ~84% of 32 768, but ctx is NOT > 32 768 → local
+  const body = { messages: [{ role: 'user', content: 'x'.repeat(110_000) }] };
+  const r = analyzeMessages(body, cfg);
+  assert.strictEqual(r.dest, 'local', `expected local, got cloud: ${r.reason}`);
+});
+
+test('saturation guard: 64K ctx escalates to cloud when input fills > 82%', () => {
+  // A model with explicit 64K context: overflow is a real risk, guard should fire.
+  const cfg = { tokenThreshold: 500_000, fileReadThreshold: 10, keywords: [], effectiveNumCtx: 65536 };
+  // ~220 000 chars → ~55 000 tokens → ~84% of 65 536 → cloud
+  const body = { messages: [{ role: 'user', content: 'x'.repeat(220_000) }] };
+  const r = analyzeMessages(body, cfg);
+  assert.strictEqual(r.dest, 'cloud');
+  assert.ok(/local context/.test(r.reason), `reason should mention "local context", got: ${r.reason}`);
+});
+
+test('saturation guard: 64K ctx stays local when input is well under 82%', () => {
+  const cfg = { tokenThreshold: 500_000, fileReadThreshold: 10, keywords: [], effectiveNumCtx: 65536 };
+  // 1 000 chars → 250 tokens → 0.4% of 65 536 → local
+  const body = { messages: [{ role: 'user', content: 'x'.repeat(1_000) }] };
+  const r = analyzeMessages(body, cfg);
+  assert.strictEqual(r.dest, 'local');
+});
+
 test('analyzeMessages respects clamped high tool-result threshold', () => {
   const cfg = { tokenThreshold: 5000, fileReadThreshold: 256, keywords: [] };
   const toolBlocks = Array.from({ length: 257 }, () => ({

@@ -64,6 +64,19 @@ function escapeRegExp(value) {
 function createReplacementState() {
   return {
     maps: new Map(),
+    // Monotonic placeholder numbering per category — incremented only when a
+    // NEW distinct value is seen.  Kept separate from stats.categories (which
+    // counts total occurrences including repeats) so placeholder numbering
+    // stays contiguous (EMAIL_1, EMAIL_2, …) even when the same value repeats.
+    counters: {
+      secret: 0,
+      url: 0,
+      email: 0,
+      path: 0,
+      id: 0,
+      term: 0,
+      identifier: 0,
+    },
     stats: {
       redactions: 0,
       categories: {
@@ -82,9 +95,9 @@ function createReplacementState() {
 function stablePlaceholder(state, category, raw) {
   const key = `${category}:${String(raw)}`;
   if (!state.maps.has(key)) {
-    const count = state.stats.categories[category] + 1;
+    state.counters[category] = (state.counters[category] || 0) + 1;
     const prefix = category === "identifier" ? "IDENT" : category.toUpperCase();
-    state.maps.set(key, `${prefix}_${count}`);
+    state.maps.set(key, `${prefix}_${state.counters[category]}`);
   }
   state.stats.categories[category] += 1;
   state.stats.redactions += 1;
@@ -107,7 +120,14 @@ function redactCustomTerms(text, cfg, state) {
   let out = text;
   const ordered = [...cfg.custom_terms].sort((a, b) => b.length - a.length);
   for (const term of ordered) {
-    const rx = new RegExp(escapeRegExp(term), "gi");
+    // Purely alphanumeric/underscore terms get word boundaries so short names
+    // like "Ace" don't redact "Aces" / "Facebook" / etc.  Terms containing
+    // punctuation or spaces keep the literal-match behavior.
+    const plain = /^[A-Za-z0-9_]+$/.test(term);
+    const pattern = plain
+      ? `\\b${escapeRegExp(term)}\\b`
+      : escapeRegExp(term);
+    const rx = new RegExp(pattern, "gi");
     out = out.replace(rx, (match) => stablePlaceholder(state, "term", match));
   }
   return out;

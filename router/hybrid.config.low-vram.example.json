@@ -1,4 +1,5 @@
 {
+  "_comment_target": "Starter config for 8 GB VRAM cards (GTX 1070, RTX 2060/3060 8GB, RTX 4060 8GB, M1/M2 8GB unified). Rename to hybrid.config.json and `ollama pull` each model in local.models before starting the router.",
   "listen": {
     "host": "127.0.0.1"
   },
@@ -6,26 +7,24 @@
     "time_zone": "America/Toronto"
   },
   "local": {
-    "model": "devstral:latest",
-    "fast_model": "qwen2.5-coder:7b",
+    "model": "qwen2.5-coder:7b",
+    "fast_model": "qwen2.5-coder:3b",
     "smart_routing": true,
     "models": [
-      "devstral:latest",
-      "gemma4:26b-a4b-it-q4_k_m",
-      "qwen3.5:latest",
-      "gemma4:e4b",
       "qwen2.5-coder:7b",
-      "deepseek-coder-v2:16b"
+      "qwen2.5-coder:3b",
+      "llama3.2:3b"
     ],
-    "cascadeQuality": true,
-    "vram_gb": 16,
-    "shadow_eval_enabled": true,
-    "shadow_eval_model": "qwen3.5:latest"
+    "cascadeQuality": false,
+    "vram_gb": 8,
+    "shadow_eval_enabled": false,
+    "shadow_eval_model": "qwen2.5-coder:3b"
   },
   "routing": {
     "mode": "hybrid",
-    "tokenThreshold": 32000,
-    "fileReadThreshold": 10,
+    "_comment_tokenThreshold": "Lower than the 16 GB default (32000). An 8 GB pool can't hold a big model + a long transcript, so push anything over 16k to cloud early rather than choke Ollama.",
+    "tokenThreshold": 16000,
+    "fileReadThreshold": 6,
     "keywords": [
       "architect",
       "security audit",

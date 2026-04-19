@@ -88,7 +88,11 @@ function mergeClaudeSettings(baseUrl) {
     );
   }
 
-  if (/^true$/i.test(String(process.env.ROUTER_REMOVE_CLAUDE_API_KEY || ""))) {
+  // Accept common truthy spellings ("1", "true", "yes", "on") — docs examples
+  // use "1" but legacy callers may still set "true".
+  if (/^(1|true|yes|on)$/i.test(
+    String(process.env.ROUTER_REMOVE_CLAUDE_API_KEY || "").trim(),
+  )) {
     if (Object.prototype.hasOwnProperty.call(obj.env, "ANTHROPIC_API_KEY")) {
       delete obj.env.ANTHROPIC_API_KEY;
       changed = true;
@@ -299,7 +303,47 @@ function notifyWindowsEnvironment() {
   );
 }
 
+function isPidAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+function clearStalePid() {
+  const pidFile = path.join(
+    process.env.USERPROFILE || process.env.HOME || "",
+    ".claude",
+    "router.pid",
+  );
+  if (!fs.existsSync(pidFile)) return;
+  let pid;
+  try {
+    pid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+  } catch (_) {
+    try { fs.unlinkSync(pidFile); } catch (_) {}
+    return;
+  }
+  if (isPidAlive(pid)) return;
+  console.log(
+    `[merge-env] Stale router PID ${pid} detected (unclean exit) — reverting proxy env first.`,
+  );
+  try { fs.unlinkSync(pidFile); } catch (_) {}
+  const revertScript = path.join(__dirname, "revert-claude-hybrid-env.js");
+  if (fs.existsSync(revertScript))
+    spawnSync(process.execPath, [revertScript], {
+      stdio: "inherit",
+      windowsHide: true,
+      env: process.env,
+      timeout: 5000,
+    });
+}
+
 function main() {
+  clearStalePid();
   const baseUrl = hybridBaseUrl();
   console.log("Hybrid base URL:", baseUrl);
   const a = mergeClaudeSettings(baseUrl);

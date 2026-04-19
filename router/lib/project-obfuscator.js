@@ -1,5 +1,7 @@
 "use strict";
 
+const { StringDecoder } = require("node:string_decoder");
+
 /**
  * project-obfuscator.js
  *
@@ -357,14 +359,21 @@ class ProjectObfuscator {
       ? `${modAlias}.${ext.toLowerCase()}`
       : modAlias;
 
-    // Register "basename.ext" → "proj_mod_001.ext"
+    // Register "basename.ext" → alias (with or without ext).
     this._reg(key, aliasWithExt);
 
-    // Also register bare "basename" → "proj_mod_001"
-    // so AI responses like "I modified proj_mod_001 to..." are also restored.
-    if (!this.fwd.has(basename) && !this.rev.has(modAlias)) {
+    // Also register bare "basename" → "proj_mod_001" so AI responses like
+    // "I modified proj_mod_001 to..." are restored to the real basename.
+    //
+    // When preserve_extensions is false, aliasWithExt === modAlias and the
+    // outer _reg above already put modAlias into this.rev — we only need to
+    // check fwd to decide whether the basename is still free to register.
+    if (!this.fwd.has(basename)) {
       this.fwd.set(basename, modAlias);
-      this.rev.set(modAlias, basename);
+      // Only add the reverse mapping if the alias isn't already there,
+      // otherwise we'd clobber the "basename.ext" → modAlias reverse entry
+      // when preserve_extensions=false.
+      if (!this.rev.has(modAlias)) this.rev.set(modAlias, basename);
     }
 
     // Register individual CamelCase / underscore components
@@ -724,6 +733,9 @@ class StreamDeobfuscator {
     this.carry = "";
     // We need to hold back (maxAliasLen - 1) chars to catch any split alias
     this.tailLen = Math.max(0, obfuscator.maxAliasLen - 1);
+    // StringDecoder buffers incomplete UTF-8 sequences across chunk boundaries
+    // so a codepoint split mid-bytes never surfaces as U+FFFD (replacement char).
+    this._decoder = new StringDecoder("utf8");
   }
 
   /**
@@ -731,7 +743,9 @@ class StreamDeobfuscator {
    * Returns a Buffer safe to write to the client response.
    */
   process(chunk) {
-    const incoming = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    const incoming = Buffer.isBuffer(chunk)
+      ? this._decoder.write(chunk)
+      : String(chunk);
     const str = this.carry + incoming;
     const replaced = this.ob.deobfuscateString(str);
     if (this.tailLen === 0) {
@@ -748,9 +762,11 @@ class StreamDeobfuscator {
    * Returns a Buffer (may be empty).
    */
   flush() {
-    const result = Buffer.from(this.ob.deobfuscateString(this.carry), "utf8");
+    // Drain any trailing bytes still held by the decoder before final replace.
+    const remainder = this._decoder.end();
+    const tail = this.carry + remainder;
     this.carry = "";
-    return result;
+    return Buffer.from(this.ob.deobfuscateString(tail), "utf8");
   }
 }
 

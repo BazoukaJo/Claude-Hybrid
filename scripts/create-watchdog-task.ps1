@@ -9,6 +9,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# watchdog-router.ps1 was removed; the router now self-reverts ANTHROPIC_BASE_URL on exit.
+if (-not (Test-Path $ScriptPath)) {
+    Write-Host "[Watchdog] $ScriptPath not found — skipping scheduled task (router self-reverts on exit)." -ForegroundColor Yellow
+    exit 0
+}
+
 # Resolve to absolute path
 $ScriptPath = (Get-Item $ScriptPath).FullName
 

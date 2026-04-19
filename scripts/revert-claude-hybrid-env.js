@@ -13,6 +13,18 @@ const { spawnSync } = require("child_process");
 
 const PREV_BASE_URL_KEY = "CLAUDE_HYBRID_PREV_ANTHROPIC_BASE_URL";
 const MANAGED_BASE_URL_KEY = "CLAUDE_HYBRID_MANAGED_ANTHROPIC_BASE_URL";
+const MANAGED_TOOL_SEARCH_VALUE = "true";
+
+// Remove ENABLE_TOOL_SEARCH if (and only if) it matches the value merge-env writes.
+// A user who set it manually to something else keeps their value.
+function clearManagedToolSearch(block) {
+  if (!block || typeof block !== "object") return false;
+  const v = block.ENABLE_TOOL_SEARCH;
+  if (v === undefined) return false;
+  if (String(v).trim().toLowerCase() !== MANAGED_TOOL_SEARCH_VALUE) return false;
+  delete block.ENABLE_TOOL_SEARCH;
+  return true;
+}
 
 function kitRouterUrls() {
   const p = String(
@@ -98,6 +110,7 @@ function revertClaudeSettingsEnv(kits) {
       delete obj.env[MANAGED_BASE_URL_KEY];
       changed = true;
     }
+    if (clearManagedToolSearch(obj.env)) changed = true;
     if (changed) {
       if (Object.keys(obj.env).length === 0) delete obj.env;
       fs.writeFileSync(file, `${JSON.stringify(obj, null, 2)}\n`, "utf8");
@@ -122,6 +135,7 @@ function revertClaudeSettingsEnv(kits) {
       delete obj.env[MANAGED_BASE_URL_KEY];
     console.log("Removed env.ANTHROPIC_BASE_URL from", file);
   }
+  clearManagedToolSearch(obj.env);
   if (Object.keys(obj.env).length === 0) delete obj.env;
   fs.writeFileSync(file, `${JSON.stringify(obj, null, 2)}\n`, "utf8");
   return true;
@@ -143,7 +157,17 @@ function revertIdeTerminalEnv(kits) {
     const block = obj[key];
     if (!block || typeof block !== "object") continue;
     const url = block.ANTHROPIC_BASE_URL;
-    if (url == null || url === "") continue;
+    // If the proxy URL is absent but ENABLE_TOOL_SEARCH residue remains, clean it.
+    if (url == null || url === "") {
+      if (clearManagedToolSearch(block)) {
+        if (Object.keys(block).length === 0) delete obj[key];
+        else obj[key] = block;
+        fs.writeFileSync(file, `${JSON.stringify(obj, null, 2)}\n`, "utf8");
+        console.log(`Removed residual ${key}.ENABLE_TOOL_SEARCH from`, file);
+        any = true;
+      }
+      continue;
+    }
     const managed = String(block[MANAGED_BASE_URL_KEY] || "").trim() === "1";
     if (!kits.has(String(url).trim()) && !managed) continue;
     const prev = String(block[PREV_BASE_URL_KEY] || "").trim();
@@ -160,6 +184,7 @@ function revertIdeTerminalEnv(kits) {
         delete block[MANAGED_BASE_URL_KEY];
       console.log(`Removed ${key}.ANTHROPIC_BASE_URL from`, file);
     }
+    clearManagedToolSearch(block);
     if (Object.keys(block).length === 0) delete obj[key];
     else obj[key] = block;
     fs.writeFileSync(file, `${JSON.stringify(obj, null, 2)}\n`, "utf8");

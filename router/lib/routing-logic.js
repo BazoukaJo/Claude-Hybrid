@@ -230,14 +230,16 @@ function analyzeMessages(body, routingCfg) {
   // enough room to produce a complete response. effectiveNumCtx is injected by server.js
   // at runtime; absent in unit tests (no-op when 0 or missing).
   //
-  // Guard: only apply saturation routing when effectiveNumCtx > 8192.
-  // Values ≤ 8192 indicate either (a) the user never changed the default, or
-  // (b) a genuinely tiny model — in both cases the token-threshold check above
-  // already handles routing correctly, and firing saturation at ~3 400 tokens
-  // (82 % of 4 096) would send every typical Claude Code request to cloud.
+  // Guard: only apply saturation routing when effectiveNumCtx > 32768.
+  // The default num_ctx is 16 384.  At 82 % that fires at ~13 435 tokens, which is
+  // below the typical Claude Code session size (15 000–30 000 tokens) and means
+  // practically every request goes to cloud — defeating local routing entirely.
+  // The token-threshold check (step 1) already handles the 16K default correctly.
+  // Saturation is only meaningful for models explicitly configured with a large
+  // context window (> 32K) where overflow is a real risk.
   const effectiveNumCtx = Number.isFinite(Number(routingCfg && routingCfg.effectiveNumCtx))
     ? Number(routingCfg.effectiveNumCtx) : 0;
-  if (effectiveNumCtx > 8192 && estTokens > effectiveNumCtx * 0.82) {
+  if (effectiveNumCtx > 32768 && estTokens > effectiveNumCtx * 0.82) {
     return { dest: "cloud", reason: `input fills ~${Math.round(estTokens / effectiveNumCtx * 100)}% of local context` };
   }
 

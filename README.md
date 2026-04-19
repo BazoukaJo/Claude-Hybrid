@@ -27,9 +27,8 @@ This section is the **contract** for how the kit is meant to work. Everything el
 
 **Autostart:**
 
-- **Windows** — `setup.ps1 -Autostart` / Startup shortcut: runs **`merge-env`** before spawning the background router so the same rules apply after login. Watchdog: `scripts/watchdog-router.ps1`.
-- **macOS** — create a launchd plist pointing at `scripts/watchdog-router.sh` (see comments inside the file). The watchdog starts the router and monitors it every 30 s.
-- **Linux** — add `@reboot bash /path/to/Claude-Hybrid/scripts/watchdog-router.sh &` to crontab, or write a systemd user service (see `scripts/watchdog-router.sh` header comments).
+- **Windows** — `setup.ps1 -Autostart` / `install_startup_shortcut.bat`: runs **`merge-env`** before spawning the background router so the same rules apply after login.
+- **macOS / Linux** — add `@reboot /path/to/Claude-Hybrid/start_app.sh` to crontab, or write a systemd user unit calling `start_app.sh`.
 
 ### 3. Supported clients
 
@@ -131,24 +130,13 @@ For a stronger end-to-end check, run **`npm run diagnose:strict`**. It sends a l
 
 **Lifecycle + hybrid vs bypass:** See **[Core behavior (read this first)](#core-behavior-read-this-first)** §§1–2. **`ROUTER_REMOVE_CLAUDE_API_KEY=1 npm run merge-env`** drops **`ANTHROPIC_API_KEY`** from `settings.json` only.
 
-### Automatic recovery (watchdog)
+### Automatic cloud fallback (self-revert on exit)
 
-When you run **`setup.ps1 -Autostart`**, a background health watchdog is installed as a **Windows scheduled task**. The watchdog:
+`router/server.js` registers `exit`, `SIGINT`, `SIGTERM`, and `uncaughtException` handlers that synchronously run `scripts/revert-claude-hybrid-env.js` the moment the process terminates — whether stopped cleanly via `stop_app.bat`, killed externally, or crashed.
 
-- Polls the router every **30 seconds** via `GET /api/health`
-- If the router crashes, **automatically restarts it** (most crashes are recovered within ~1 minute)
-- If the router stays down after **3+ restart attempts**, it **silently reverts** `ANTHROPIC_BASE_URL` from all sources so **Claude Code falls back to Anthropic cloud** (zero downtime, zero user intervention)
-- Logs all events to **`~/.claude/watchdog.log`** — check this file to see what the watchdog did
+The revert script clears `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` and IDE terminal env blocks, so **Claude Code automatically falls back to Anthropic cloud** the next time it makes a request.
 
-**You don't have to do anything.** The watchdog runs silently in the background at every login. If your router crashes mid-session, Claude Code will keep working (either via the auto-restarted local router or via cloud fallback).
-
-To manually check watchdog status:
-
-```powershell
-Get-ScheduledTask -TaskName "Claude Hybrid Watchdog"      # task status
-Get-Content (Join-Path $env:USERPROFILE '.claude\watchdog.log')  # view logs
-Start-ScheduledTask -TaskName "Claude Hybrid Watchdog"    # force immediate run (debugging)
-```
+**You don't have to do anything.** If the router stops for any reason, your next `claude` command goes directly to the cloud. Run `start_app.bat` (or `./start_app.sh`) to re-enable local routing.
 
 ---
 
@@ -193,7 +181,7 @@ On the **host**, point Claude at the proxy (**`http://127.0.0.1:8082`**) — run
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Start router                | **Windows:** **`start_app.bat`**. **Linux/macOS:** **`./start_app.sh`** (chmod +x first). **Any OS:** **`npm start`** / **`node router/server.js`** — then **`npm run merge-env`** if proxy URL is not set.           |
 | Stop / restart              | **Windows:** **`stop_app.bat`** / **`restart_app.bat`**. **Linux/macOS:** **`./stop_app.sh`** / **`./restart_app.sh`** (`keepenv` arg to skip env revert on either platform).                                         |
-| Login autostart             | **Windows:** **`install_startup_shortcut.bat`** (Startup folder .lnk). **macOS:** launchd plist → `scripts/watchdog-router.sh`. **Linux:** crontab `@reboot` or systemd user unit (see `scripts/watchdog-router.sh`). |
+| Login autostart             | **Windows:** **`install_startup_shortcut.bat`** (Startup folder .lnk). **macOS / Linux:** crontab `@reboot /path/to/Claude-Hybrid/start_app.sh` or systemd user unit. |
 | Open dashboard              | Browser: **`http://127.0.0.1:8082/`** (or `localhost`; use **`ROUTER_PORT`** if not 8082)                                                                                                                             |
 | Run tests                   | `npm test` · full + UI screenshots: `npm run test:all`                                                                                                                                                                |
 | Check IDE / Claude env      | **`npm run diagnose`** (Windows PowerShell: `ANTHROPIC_BASE_URL`, `ROUTER_PORT`, listener, `settings.json`, API key hint)                                                                                             |
@@ -234,9 +222,10 @@ Copy from **`router/hybrid.config.example.json`** if missing. Main keys:
 | `local.smart_routing`                         | If true, pick among pool models by task shape, context need, tools, vision, and prompt weight.  |
 | `local.fast_model`                            | Optional smaller local tag preferred for brief or speed-style prompts.                          |
 | `routing.mode`                                | `hybrid`, `cloud`, or `local`. The dashboard routing-mode buttons write this key automatically. |
-| `routing.tokenThreshold`                      | Route cloud if estimated transcript tokens exceed this. Default: `5000`.                        |
-| `routing.fileReadThreshold`                   | Route cloud if the **latest user message** contains more than this many `tool_result` blocks.   |
+| `routing.tokenThreshold`                      | Route cloud if estimated transcript tokens exceed this. Default: `32000`.                       |
+| `routing.fileReadThreshold`                   | Route cloud if the **latest user message** contains more than this many `tool_result` blocks. Default: `10`. |
 | `routing.keywords`                            | Substrings in the last user message that bias toward cloud routing.                             |
+| `routing.quotaRecoveryMinutes`                | After an Anthropic 429 / quota-exceeded response, how long (minutes) the router stays in local-only fallback before probing the cloud again. Default: `60`. |
 | `privacy.cloud_redaction.enabled`             | Enable cloud-only privacy filtering before forwarding to Anthropic.                             |
 | `privacy.cloud_redaction.redact_tool_results` | Redact tool-result payloads as well as user/system text.                                        |
 | `privacy.cloud_redaction.redact_paths`        | Replace Windows and Unix-like absolute paths with stable placeholders.                          |
@@ -246,15 +235,25 @@ Copy from **`router/hybrid.config.example.json`** if missing. Main keys:
 | `privacy.cloud_redaction.redact_ids`          | Replace UUID-like IDs with placeholders.                                                        |
 | `privacy.cloud_redaction.redact_identifiers`  | Optional stronger mode that pseudonymizes camelCase / PascalCase / snake_case identifiers.      |
 | `privacy.cloud_redaction.custom_terms`        | Extra project-specific terms to replace before cloud forwarding.                                |
+| `privacy.project_obfuscation.enabled`         | Bidirectional project-term obfuscator: outbound requests get neutral aliases (`proj_mod_001.cpp`, `ProjTerm001`), inbound responses are restored so Claude Code tools (Read/Edit/Bash/Glob/Grep) still work with real names. On by default. |
+| `privacy.project_obfuscation.project_terms`   | Explicit terms always obfuscated (highest priority).                                            |
+| `privacy.project_obfuscation.auto_detect_filenames` | Auto-detect source file names (`.cpp`, `.js`, …) in prompts and tool content.             |
+| `privacy.project_obfuscation.auto_detect_identifiers` | Auto-detect camelCase / PascalCase / snake_case identifiers (opt-in; stronger but noisier). |
+| `privacy.project_obfuscation.alias_prefix`    | Lowercase prefix for generated aliases. Default: `proj`.                                        |
+| `privacy.project_obfuscation.preserve_extensions` | Keep `.cpp` / `.js` / etc. on aliased filenames so the model still sees the language.       |
+| `privacy.project_obfuscation.scan_system_prompt` | Include the system prompt in the outgoing obfuscation pass.                                  |
+| `privacy.project_obfuscation.scan_tool_results` | Include tool-result blocks in the outgoing obfuscation pass.                                  |
 
 Changes are picked up when the file is saved (watcher), or after routing / default-model POSTs from the dashboard.
 A root **`.gitignore`** may exclude `router/hybrid.config.json` so machine-specific settings are not committed; keep the **example** file in git.
 
 ## Privacy layer
 
-Privacy redaction is **off by default** and only applies to requests that are about to go to Anthropic. Local Ollama requests are left untouched.
+Two independent privacy passes are applied to cloud-bound traffic only. Local Ollama requests are never touched.
 
-When enabled, the router replaces sensitive content with stable placeholders such as `SECRET_1`, `PATH_1`, or `TERM_1`. The same original value maps to the same placeholder within a request, which keeps the prompt readable enough for Claude while reducing accidental leakage of project names, credentials, internal paths, or infrastructure details.
+### 1. Cloud redaction (`privacy.cloud_redaction`) — off by default
+
+Replaces sensitive content with stable placeholders (`SECRET_1`, `PATH_1`, `TERM_1`, …). The same original value maps to the same placeholder **within a request**, which keeps the prompt readable enough for Claude while reducing accidental leakage of credentials, internal paths, or infrastructure details. Placeholders are **not** restored on the way back — this is one-way masking.
 
 Recommended first pass:
 
@@ -262,6 +261,17 @@ Recommended first pass:
 - Keep path, URL, email, secret, ID, and tool-result redaction enabled
 - Add a few project names or internal codenames to `custom_terms`
 - Leave `redact_identifiers` off unless you specifically want stronger obfuscation and can tolerate more prompt distortion
+
+### 2. Project obfuscation (`privacy.project_obfuscation`) — on by default
+
+**Bidirectional** alias layer for project-specific file names and optional identifiers:
+
+- **Outbound** (to Anthropic): file names and explicit `project_terms` are rewritten to neutral aliases like `proj_mod_001.cpp` / `ProjTerm001`. File extensions are preserved so the model still knows the language.
+- **Inbound** (from Anthropic, including SSE streams): aliases are restored to the original names before the response reaches Claude Code. A tail-buffer handles cases where an alias is split across stream chunks, and the carry is flushed on both mid-stream quota redirects and upstream errors so no partial alias ever leaks.
+
+This is what lets Claude Code's Read/Edit/Bash/Glob/Grep tools continue to work with your real paths — the cloud never sees the names, but your IDE session does. Set `auto_detect_identifiers: true` for stronger pseudonymization at the cost of more prompt distortion.
+
+`/api/stats` exposes whether either pass is enabled (and `auto_detect_filenames` / `auto_detect_identifiers` / current alias count) without leaking the terms themselves.
 
 ---
 
@@ -282,6 +292,8 @@ Additional behavior worth knowing:
 - With smart routing enabled, the local picker can choose a different Ollama model from the pool based on tools, vision, context size, and prompt weight.
 - The speed-assist model can take brief prompts when it is configured and the request looks latency-sensitive.
 - Cloud-model selection is preserved on Claude-bound requests.
+- A context-saturation guard escalates to cloud when the input fills &gt; 82 % of `num_ctx`, but **only** for models with `num_ctx > 32 768`. Smaller-context models are handled by `tokenThreshold` alone, which avoids spurious cloud escalation on the default 16 K window.
+- **Cloud quota auto-recovery:** when Anthropic returns a 429 / quota-exceeded, the router enters local-only fallback automatically. After `routing.quotaRecoveryMinutes` (default 60) the next request probes the cloud again; success silently resumes hybrid routing, failure restarts the TTL.
 
 VRAM safety behavior in smart routing:
 

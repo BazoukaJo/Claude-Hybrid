@@ -16,11 +16,11 @@ Guidance for Claude Code (and similar agents) working in this repository.
 - **Windows:** **`start_app.bat`** runs **`merge-env`** then starts **`node router/server.js`**. **`stop_app.bat`** stops the process and **by default** runs **`scripts/revert-hybrid-core.bat`** (clear kit proxy from **`~/.claude/settings.json`**, VS Code **`terminal.integrated.env.*`**, User **`ANTHROPIC_BASE_URL`**). **`stop_app.bat keepenv`** stops without reverting.
 - **Linux / macOS:** **`./start_app.sh`** and **`./stop_app.sh`** mirror the Windows bat scripts (`chmod +x *.sh` once). `stop_app.sh` calls `node scripts/revert-claude-hybrid-env.js` (reverts `~/.claude/settings.json` + IDE terminal env). **`./stop_app.sh keepenv`** stops without reverting.
 - **Manual `npm start`:** run **`npm run merge-env`** when enabling the proxy; **`npm run revert-env`** (and User env script if used on Windows) when returning to cloud-only.
-- **Autostart:** Windows — `setup.ps1 -Autostart` / Startup shortcut. macOS — launchd plist wrapping `scripts/watchdog-router.sh`. Linux — crontab `@reboot` or systemd user unit (see `scripts/watchdog-router.sh`).
+- **Autostart:** Windows — `setup.ps1 -Autostart` / Startup shortcut (`install_startup_shortcut.bat`). macOS/Linux — `@reboot` crontab or systemd user unit calling `./start_app.sh`.
 
 ### Clients
 
-**Claude Code** (CLI and VS Code plugin): use the proxy when env is merged — all model variants route correctly through the proxy. **Automatic recovery (watchdog):** When `-Autostart` is used, a background health watchdog monitors the router every 30 seconds. If the router crashes, the watchdog auto-restarts it (most recoveries within ~1 min). If restart fails after 3+ attempts, the watchdog silently reverts `ANTHROPIC_BASE_URL` so Claude Code falls back to Anthropic cloud — **zero downtime, zero user intervention**. Check **`~/.claude/watchdog.log`** for recovery events.
+**Claude Code** (CLI and VS Code plugin): use the proxy when env is merged — all model variants route correctly through the proxy. **Automatic cloud fallback (self-revert):** `router/server.js` registers `exit`, `SIGINT`, `SIGTERM`, and `uncaughtException` handlers that synchronously run `scripts/revert-claude-hybrid-env.js` before the process terminates. This clears `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` and IDE terminal env so Claude Code falls back to Anthropic cloud the moment the router stops — whether stopped cleanly, killed, or crashed — with **zero user intervention**.
 
 ## What this project is
 
@@ -56,7 +56,7 @@ The proxy maps Anthropic message/tool format to OpenAI-style bodies for Ollama, 
 ## Config files
 
 - **`router/hybrid.config.json`** — Optional; created from **`router/hybrid.config.example.json`** by `setup.ps1` if missing. Watcher reloads on save.
-  Relevant keys: `listen.host`, **`display.time_zone`**, **`local.model`**, **`local.models`**, **`local.smart_routing`**, **`local.fast_model`**, **`routing.mode`**, **`routing.tokenThreshold`**, **`routing.fileReadThreshold`**, **`routing.keywords`**, and **`privacy.cloud_redaction.*`**. Dashboard updates write the local-routing and routing-mode keys automatically.
+  Relevant keys: `listen.host`, **`display.time_zone`**, **`local.model`**, **`local.models`**, **`local.smart_routing`**, **`local.fast_model`**, **`local.vram_gb`**, **`local.cascadeQuality`**, **`local.shadow_eval_enabled`**, **`local.shadow_eval_model`**, **`routing.mode`**, **`routing.tokenThreshold`**, **`routing.fileReadThreshold`**, **`routing.keywords`**, **`routing.quotaRecoveryMinutes`**, **`privacy.cloud_redaction.*`**, and **`privacy.project_obfuscation.*`**. Dashboard updates write the local-routing and routing-mode keys automatically.
   If **`local.model`** or **`local.fast_model`** is **missing or empty**, the router **on startup** reads **`GET /api/tags`** and writes sensible defaults into the file (skip with **`ROUTER_SKIP_AUTO_DEFAULT_MODELS=1`**).
 - **`.claude/model-params.json`** — Global generation defaults (dashboard **Save** / **Generation settings**). This is the **repo-local** `.claude/` directory, not `~/.claude/` (Claude Code's global config).
 - **`.claude/model-params-per-model.json`** — Per-model overrides. (Also repo-local.)
@@ -83,16 +83,23 @@ Root **`.gitignore`** may exclude `router/hybrid.config.json` and some `.claude/
 
 **Cloud** if any:
 
-- Estimated tokens (whole transcript) &gt; `routing.tokenThreshold` (default 5000)
+- Estimated tokens (whole transcript) &gt; `routing.tokenThreshold` (default 32 000)
 - More than `routing.fileReadThreshold` **`tool_result`** blocks in the **latest user message** only
 - Last user message contains any `routing.keywords` entry
+- Input fills &gt; 82 % of `num_ctx` **only when** `num_ctx > 32 768` (saturation guard — protects explicitly-large-context models; does not fire for the 16 K default, which is handled by `tokenThreshold` alone)
 
 **Else local.**
 With **`local.smart_routing`** and multiple models in the pool, **`router/lib/local-model-picker.js`** scores by vision/tools, size, “heavy” vs “brief” prompts, optional **`local.fast_model`**, and **tool results in the latest user message**. Broad keywords like `audit` are guarded to avoid needless cloud escalation for short generic prompts. Cloud-bound requests preserve the selected Claude model.
 
-## Privacy redaction
+**Cloud quota auto-recovery:** when the router detects a 429 / quota-exceeded response from Anthropic it enters local-only fallback automatically. After **`routing.quotaRecoveryMinutes`** (default 60) the quota state expires and the next request probes Anthropic again — if it still fails, the TTL restarts; if it succeeds, hybrid mode resumes silently. The `GET /api/stats` response includes `cloud_quota.recovery_minutes`.
 
-The router supports an **opt-in, cloud-only** privacy layer under **`privacy.cloud_redaction`** in `router/hybrid.config.json`.
+## Privacy layer (cloud-bound traffic only)
+
+Two independent passes apply to requests about to be forwarded to Anthropic. Local Ollama requests are never touched.
+
+### 1. `privacy.cloud_redaction` — opt-in, **one-way masking**
+
+Defined in `router/hybrid.config.json`; implemented in **`router/lib/privacy-redactor.js`**.
 
 - `enabled` turns redaction on for requests forwarded to Anthropic
 - `redact_tool_results` applies the same pass to tool-result payloads
@@ -100,7 +107,17 @@ The router supports an **opt-in, cloud-only** privacy layer under **`privacy.clo
 - `custom_terms` lets users replace project-specific names or internal codenames
 - `redact_identifiers` is a stronger mode that pseudonymizes camelCase / PascalCase / snake_case identifiers
 
-The redactor currently lives in **`router/lib/privacy-redactor.js`**. `/api/stats` exposes whether the feature is enabled and whether tool-result or identifier redaction is active, but it does not expose the custom terms themselves.
+Placeholders are **not** restored on the response — use this for leak reduction, not for preserving tool-call round-trips.
+
+### 2. `privacy.project_obfuscation` — on by default, **bidirectional alias layer**
+
+Implemented in **`router/lib/project-obfuscator.js`** + `StreamDeobfuscator` (same file).
+
+- **Outbound:** file names and explicit `project_terms` are rewritten to neutral aliases (e.g. `proj_mod_001.cpp`, `ProjTerm001`). `preserve_extensions` keeps the language hint for the model.
+- **Inbound (incl. SSE):** aliases are restored to originals before the response reaches Claude Code so Read/Edit/Bash/Glob/Grep tools still work with real paths. The stream deobfuscator uses a tail-buffer for aliases split across chunk boundaries, and `streamDeobf.flush()` is called on both mid-stream quota redirects and SSE upstream errors so no partial alias bytes leak.
+- Keys: `enabled`, `project_terms`, `auto_detect_filenames`, `auto_detect_identifiers`, `alias_prefix` (default `proj`), `preserve_extensions`, `scan_system_prompt`, `scan_tool_results`.
+
+`/api/stats` exposes enablement plus `auto_detect_filenames` / `auto_detect_identifiers` / alias count for both layers — it does **not** expose the custom terms or alias mapping themselves. Per-request router logs emit `REDACT —` and `OBFUSC —` lines with counts/categories so you can confirm either pass fired without seeing underlying values.
 
 ## API touches agents often care about
 
@@ -151,7 +168,7 @@ chmod +x start_app.sh stop_app.sh restart_app.sh   # once
 ./restart_app.sh      # stop keepenv + wait + start
 ANTHROPIC_BASE_URL="" claude   # force cloud for this session
 npm run merge-env
-# Watchdog: bash scripts/watchdog-router.sh &  (or via launchd / cron — see script header)
+# Autostart: add @reboot to crontab, or write a systemd user unit calling ./start_app.sh
 ```
 
 The dashboard footer log hydrates from `/api/logs` and then follows `/events`, so an empty footer after refresh is a bug rather than expected behavior.

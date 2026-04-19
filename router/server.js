@@ -7,7 +7,7 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { exec, execFile } = require("child_process");
+const { exec, execFile, spawnSync } = require("child_process");
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 const {
@@ -602,11 +602,25 @@ function clearCloudQuotaExceeded() {
 }
 
 function getCloudQuotaState() {
+  if (cloudQuotaState.exceeded && cloudQuotaState.at) {
+    // Auto-expire: once the configured TTL passes, speculatively clear the quota
+    // state so the next request probes Anthropic.  If the quota is still exceeded,
+    // the 429 handler will re-mark it (restarting the TTL).  If it succeeds,
+    // clearCloudQuotaExceeded() fires normally.  Default: 60 minutes.
+    const ttlMs = Math.max(1, Number(CFG.routing.quotaRecoveryMinutes) || 60) * 60_000;
+    if (Date.now() - cloudQuotaState.at >= ttlMs) {
+      process.stdout.write(
+        `[${ts()}] QUOTA — auto-recovery: TTL expired, probing cloud again\n`,
+      );
+      clearCloudQuotaExceeded();
+    }
+  }
   return {
     exceeded: !!cloudQuotaState.exceeded,
     message: cloudQuotaState.message || "",
     at: cloudQuotaState.at || 0,
     disabled_modes: cloudQuotaState.exceeded ? ["hybrid", "cloud"] : [],
+    recovery_minutes: Math.max(1, Number(CFG.routing.quotaRecoveryMinutes) || 60),
   };
 }
 
@@ -1332,6 +1346,30 @@ function proxyCloud(
     }
   }
 
+  // ── Privacy / obfuscation audit log ────────────────────────────────────────
+  // Emit one line so the router log always shows whether sensitive content was
+  // transformed before leaving for Anthropic.  Silent no-ops were the cause of
+  // "it never obfuscates" confusion: the feature was enabled but produced no
+  // observable output when nothing matched.
+  if (privacy.changed) {
+    const cats = Object.keys(privacy.categories || {});
+    process.stdout.write(
+      `[${ts()}] REDACT — ${privacy.redactions} substitution(s)` +
+        (cats.length ? ` [${cats.join(", ")}]` : "") +
+        "\n",
+    );
+  } else if (CFG.privacy.cloud_redaction.enabled) {
+    process.stdout.write(`[${ts()}] REDACT — enabled, no sensitive patterns matched\n`);
+  } else {
+    process.stdout.write(`[${ts()}] REDACT — disabled (cloud_redaction.enabled=false)\n`);
+  }
+  if (projObf) {
+    const aliases = projObf.fwd ? projObf.fwd.size : 0;
+    process.stdout.write(
+      `[${ts()}] OBFUSC — project obfuscation active, ${aliases} alias(es) registered\n`,
+    );
+  }
+
   const cloudRawBody = bodyModified
     ? Buffer.from(JSON.stringify(cloudBody))
     : rawBody;
@@ -1386,10 +1424,18 @@ function proxyCloud(
             routeTo("local", "cloud limit detected, fallback to local", true);
             return proxyLocal(incoming, body, res, rawBody, cloudLimitRoute);
           }
+          // Deobfuscate project aliases in the error body so Claude Code sees
+          // real filenames/identifiers in the error message (otherwise the
+          // error echoes back "proj_mod_001.cpp" which confuses the client).
+          let finalErrBuf = bodyBuf;
+          if (projObf) {
+            const deobfErr = projObf.deobfuscateString(bodyTxt);
+            if (deobfErr !== bodyTxt) finalErrBuf = Buffer.from(deobfErr, "utf8");
+          }
           res.writeHead(upstream.statusCode, {
             "Content-Type": "application/json",
           });
-          res.end(bodyBuf);
+          res.end(finalErrBuf);
         });
         return;
       }
@@ -1397,6 +1443,25 @@ function proxyCloud(
       let sniffing = true;
       const sniffedChunks = [];
       let sniffedBytes = 0;
+      // Separate quality-log sample accumulator — NEVER cleared by flushStream.
+      // The original code reused sniffedChunks for the quality sample, but
+      // flushStream() resets that array the moment sniffing ends, leaving the
+      // sample empty on upstream.on("end") and silently killing shadow-eval
+      // coverage for every streaming response.
+      const QL_SAMPLE_CAP = 8192;
+      let qlSampleBytes = 0;
+      const qlSampleChunks = [];
+      const accumulateQlSample = (chunk) => {
+        if (!qlEntry || qlSampleBytes >= QL_SAMPLE_CAP) return;
+        const need = QL_SAMPLE_CAP - qlSampleBytes;
+        if (chunk.length <= need) {
+          qlSampleChunks.push(chunk);
+          qlSampleBytes += chunk.length;
+        } else {
+          qlSampleChunks.push(chunk.slice(0, need));
+          qlSampleBytes = QL_SAMPLE_CAP;
+        }
+      };
       // Stream-level deobfuscator: restores project aliases in SSE chunks.
       // Uses a tail-buffer so aliases split across chunk boundaries are handled.
       const streamDeobf = projObf ? new StreamDeobfuscator(projObf) : null;
@@ -1409,7 +1474,9 @@ function proxyCloud(
       const flushStream = () => {
         if (redirected || !sniffing) return;
         sniffing = false;
-        clearCloudQuotaExceeded();
+        // Quota state is cleared on successful end (upstream.on("end")) rather
+        // than mid-stream flush — a 200 SSE stream can still turn out to carry
+        // a mid-stream limit/overload event that the prefix sniff missed.
         res.writeHead(upstream.statusCode, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
@@ -1419,6 +1486,7 @@ function proxyCloud(
       };
       upstream.on("data", (chunk) => {
         if (redirected) return;
+        accumulateQlSample(chunk);
         if (!sniffing) {
           writeChunk(chunk);
           return;
@@ -1444,6 +1512,12 @@ function proxyCloud(
           try {
             upstream.destroy();
           } catch {}
+          // Discard any deobfuscator carry: the sniffed bytes were never written
+          // to the client (we intercept before flushStream has run), so there is
+          // nothing downstream to reconcile.  Resetting the buffer prevents the
+          // next request (if someone reuses projObf across retries) from leaking
+          // a stale partial alias.
+          if (streamDeobf) streamDeobf.flush();
           routeTo("local", "cloud limit detected, fallback to local", true);
           void proxyLocal(incoming, body, res, rawBody, cloudLimitRoute);
           return;
@@ -1460,12 +1534,13 @@ function proxyCloud(
           if (tail.length) res.write(tail);
         }
         res.end();
-        // Quality logger: record streaming response metrics asynchronously
+        if (upstream.statusCode < 400) clearCloudQuotaExceeded();
+        // Quality logger: record streaming response metrics asynchronously.
+        // Use the dedicated qlSampleChunks accumulator, which survives
+        // flushStream() (unlike sniffedChunks, which is cleared at sniff-end).
         if (qlEntry) {
           const ql = getQualityLogger();
-          const sampleText = Buffer.concat(sniffedChunks.slice(0, 20)).toString(
-            "utf8",
-          );
+          const sampleText = Buffer.concat(qlSampleChunks).toString("utf8");
           ql.finishCloud(
             qlEntry,
             sampleText,
@@ -1492,12 +1567,26 @@ function proxyCloud(
           ).catch(() => {});
         }
       });
-      upstream.on("error", () => {
+      upstream.on("error", (err) => {
         if (redirected) return;
+        process.stdout.write(
+          `[${ts()}] CLOUD-ERR — SSE stream error: ${err && err.message ? err.message : String(err)}\n`,
+        );
         if (!res.headersSent) {
           res.writeHead(502, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "cloud stream error" }));
           return;
+        }
+        // Headers are already out and some deobfuscated bytes were flushed to the
+        // client — flush the tail-buffer so no half-alias is left on the wire
+        // before we close the connection.  Without this, the final partial alias
+        // (e.g. "proj_mo") would arrive at Claude Code never restored to the
+        // real identifier.
+        if (streamDeobf) {
+          try {
+            const tail = streamDeobf.flush();
+            if (tail && tail.length) res.write(tail);
+          } catch {}
         }
         res.end();
       });
@@ -1567,7 +1656,10 @@ function proxyCloud(
       }
     });
   });
-  req.on("error", () => {
+  req.on("error", (err) => {
+    process.stdout.write(
+      `[${ts()}] CLOUD-ERR — request error: ${err && err.message ? err.message : String(err)}\n`,
+    );
     if (!res.headersSent)
       res.writeHead(502).end(JSON.stringify({ error: "cloud error" }));
   });
@@ -1767,7 +1859,10 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
           });
         }
       });
-      req.on("error", () => {
+      req.on("error", (err) => {
+        process.stdout.write(
+          `[${ts()}] LOCAL-ERR — Ollama connection error: ${err && err.message ? err.message : String(err)}\n`,
+        );
         if (ollamaUnreachableMayUseCloud())
           proxyCloud(incoming, rawBody, body, res, true);
         else if (!res.headersSent) {
@@ -1780,7 +1875,10 @@ function proxyLocal(incoming, body, res, rawBody, routeSummary) {
       armProxyRequestTimeout(req, res, "Ollama");
       req.write(openaiBody);
       req.end();
-    } catch {
+    } catch (err) {
+      process.stdout.write(
+        `[${ts()}] LOCAL-ERR — proxyLocal threw: ${err && err.message ? err.message : String(err)}\n`,
+      );
       if (ollamaUnreachableMayUseCloud())
         proxyCloud(incoming, rawBody, body, res, true);
       else if (!res.headersSent) {
@@ -5824,7 +5922,58 @@ async function startListening() {
       console.log(`  Idle       -> auto-unload after ${idleMin} min`);
     console.log("");
     startIdleUnloadTimer();
+    try {
+      fs.mkdirSync(path.dirname(_pidFile), { recursive: true });
+      fs.writeFileSync(_pidFile, String(process.pid), "utf8");
+    } catch (_) {}
   });
 }
 
 void startListening();
+
+// ─── Self-revert: when the router exits, clear ANTHROPIC_BASE_URL so Claude Code
+// falls back to Anthropic cloud instead of failing on a dead proxy. ─────────────
+const _revertScript = path.join(
+  __dirname,
+  "..",
+  "scripts",
+  "revert-claude-hybrid-env.js",
+);
+const _pidFile = path.join(os.homedir(), ".claude", "router.pid");
+let _envReverted = false;
+function _revertEnvOnExit() {
+  if (_envReverted) return;
+  _envReverted = true;
+  try { fs.unlinkSync(_pidFile); } catch (_) {}
+  try {
+    if (fs.existsSync(_revertScript))
+      spawnSync(process.execPath, [_revertScript], {
+        stdio: "ignore",
+        windowsHide: true,
+        env: process.env,
+        timeout: 5000,
+      });
+  } catch (_) {}
+}
+process.on("exit", _revertEnvOnExit);
+process.on("SIGINT", () => {
+  _revertEnvOnExit();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  _revertEnvOnExit();
+  process.exit(0);
+});
+process.on("uncaughtException", (err) => {
+  console.error(
+    "[router] Fatal exception — reverting proxy env:",
+    err.message || err,
+  );
+  _revertEnvOnExit();
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[router] Unhandled rejection — reverting proxy env:", reason);
+  _revertEnvOnExit();
+  process.exit(1);
+});
