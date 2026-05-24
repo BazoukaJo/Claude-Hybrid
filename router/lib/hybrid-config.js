@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { normalizeRoutingMode } = require("./routing-logic");
 const { normalizeTimeZone } = require("./time-format");
+const { applyCloudConfig } = require("../../scripts/lib/cloud-upstream");
 
 const CONFIG_BASENAME = "hybrid.config.json";
 
@@ -84,7 +85,14 @@ function applyUserConfig(CFG, user) {
         .map((t) => String(t || "").trim())
         .filter(Boolean);
     }
+    if (Number.isFinite(Number(r.quotaRecoveryMinutes))) {
+      CFG.routing.quotaRecoveryMinutes = Math.max(
+        1,
+        Math.round(Number(r.quotaRecoveryMinutes)),
+      );
+    }
   }
+  applyCloudConfig(CFG, user);
   if (user.display && typeof user.display === "object") {
     const d = user.display;
     if (Object.prototype.hasOwnProperty.call(d, "time_zone")) {

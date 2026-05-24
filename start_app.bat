@@ -248,8 +248,8 @@ if defined PORT_PID (
 :: ------------------------------------------------------------
 :: Section 7 — Merge env and launch router
 :: ------------------------------------------------------------
-echo   Applying hybrid routing: ANTHROPIC_BASE_URL -^> http://127.0.0.1:%ROUTER_PORT%
-echo   ^(Claude settings, User env, IDE terminals^)...
+echo   Applying hybrid routing: client ANTHROPIC_BASE_URL -^> http://127.0.0.1:%ROUTER_PORT%
+echo   ^(Custom proxy URLs are kept as cloud upstream; Claude settings, User env, IDE terminals^)...
 node "%~dp0scripts\merge-claude-hybrid-env.js"
 if errorlevel 1 (
   echo WARNING: merge-claude-hybrid-env.js failed. Starting router anyway; run npm run merge-env manually.

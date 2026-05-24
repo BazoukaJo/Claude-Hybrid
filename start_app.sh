@@ -184,7 +184,8 @@ if [ -n "${PORT_PID}" ]; then
 fi
 
 # ── Section 8 — Apply proxy env and launch ────────────────────────────────
-echo "  Applying hybrid routing: ANTHROPIC_BASE_URL -> http://127.0.0.1:${ROUTER_PORT} ..."
+echo "  Applying hybrid routing: client ANTHROPIC_BASE_URL -> http://127.0.0.1:${ROUTER_PORT} ..."
+echo "  (Custom proxy URLs are kept as cloud upstream for hybrid -> cloud traffic.)"
 if ! node scripts/merge-claude-hybrid-env.js; then
   _warn "merge-claude-hybrid-env.js failed. Run: npm run merge-env"
 fi

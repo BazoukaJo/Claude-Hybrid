@@ -149,7 +149,7 @@ const CFG = {
   ],
   routing: {
     mode: "hybrid",
-    tokenThreshold: 5000,
+    tokenThreshold: 32000,
     fileReadThreshold: 10,
     keywords: [
       "architect",
@@ -5089,6 +5089,11 @@ const server = http.createServer(async (req, res) => {
           force_local_if_privacy_terms: !!CFG.routing.forceLocalIfPrivacyTerms,
           privacy_custom_terms_count: (CFG.routing.privacyCustomTerms || [])
             .length,
+          cloud_upstream: {
+            protocol: CFG.cloud.protocol,
+            host: CFG.cloud.host,
+            port: CFG.cloud.port,
+          },
         },
       }),
     );

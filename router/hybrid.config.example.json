@@ -22,6 +22,10 @@
     "shadow_eval_enabled": true,
     "shadow_eval_model": "qwen3.5:latest"
   },
+  "cloud": {
+    "_comment": "Optional cloud upstream when not using api.anthropic.com directly. merge-env auto-detects a custom ANTHROPIC_BASE_URL (e.g. corporate proxy) and writes it here; ROUTER_CLOUD_* env vars override at runtime.",
+    "base_url": ""
+  },
   "routing": {
     "mode": "hybrid",
     "tokenThreshold": 32000,

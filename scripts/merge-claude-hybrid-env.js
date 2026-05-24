@@ -20,7 +20,12 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const PREV_BASE_URL_KEY = "CLAUDE_HYBRID_PREV_ANTHROPIC_BASE_URL";
+const {
+  PREV_BASE_URL_KEY,
+  prepareCloudUpstream,
+  isDefaultCloudTarget,
+} = require("./lib/cloud-upstream");
+
 const MANAGED_BASE_URL_KEY = "CLAUDE_HYBRID_MANAGED_ANTHROPIC_BASE_URL";
 
 function routerPort() {
@@ -344,8 +349,17 @@ function clearStalePid() {
 
 function main() {
   clearStalePid();
+  const repoRoot = path.join(__dirname, "..");
+  const cloudUpstream = prepareCloudUpstream(repoRoot);
+  if (isDefaultCloudTarget(cloudUpstream)) {
+    console.log("Cloud upstream (hybrid -> cloud): api.anthropic.com (default)");
+  } else {
+    console.log(
+      `Cloud upstream (hybrid -> cloud): ${cloudUpstream.protocol}://${cloudUpstream.host}:${cloudUpstream.port} (${cloudUpstream.source})`,
+    );
+  }
   const baseUrl = hybridBaseUrl();
-  console.log("Hybrid base URL:", baseUrl);
+  console.log("Hybrid client URL:", baseUrl);
   const a = mergeClaudeSettings(baseUrl);
   const b = mergeIdeTerminalEnv(baseUrl);
   const c = mergeUserEnv(baseUrl);
